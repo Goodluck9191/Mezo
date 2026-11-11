@@ -4,7 +4,7 @@ Multi-restaurant QR ordering SaaS for dine-in restaurants in Tanzania.
 
 **SMART DINING. SIMPLE SERVICE.**
 
-> **Status: Phase 1 — project foundation.** There is no authentication, database schema, ordering flow, or payment integration yet. The landing page describes the planned product; it is not a live service.
+> **Status: Phase 2 — database architecture and security.** The schema, RLS, helpers, triggers, migrations and executable tests are in place. There is no application UI for auth, ordering or payments yet; the landing page describes the planned product and is not a live service.
 
 ## Stack
 
@@ -49,18 +49,26 @@ Never commit `.env.local` or real keys. The service-role key must only be import
 
 ## Scripts
 
-| Command                | Purpose                      |
-| ---------------------- | ---------------------------- |
-| `npm run dev`          | Start the development server |
-| `npm run build`        | Production build             |
-| `npm run start`        | Run the production build     |
-| `npm run lint`         | ESLint                       |
-| `npm run lint:fix`     | ESLint with autofix          |
-| `npm run typecheck`    | TypeScript, no emit          |
-| `npm run test`         | Unit tests (Vitest)          |
-| `npm run test:watch`   | Unit tests in watch mode     |
-| `npm run format`       | Prettier write               |
-| `npm run format:check` | Prettier check               |
+| Command                   | Purpose                                                           |
+| ------------------------- | ----------------------------------------------------------------- |
+| `npm run dev`             | Start the development server                                      |
+| `npm run build`           | Production build                                                  |
+| `npm run start`           | Run the production build                                          |
+| `npm run lint`            | ESLint                                                            |
+| `npm run lint:fix`        | ESLint with autofix                                               |
+| `npm run typecheck`       | TypeScript, no emit                                               |
+| `npm run test`            | Unit + database tests (Vitest)                                    |
+| `npm run test:watch`      | Tests in watch mode                                               |
+| `npm run test:unit`       | Unit tests only                                                   |
+| `npm run test:db`         | Database schema and RLS tests (PGlite, default)                   |
+| `npm run test:db:staging` | Same suite against mezo-staging (set credentials in `.env.local`) |
+| `npm run db:start`        | Start the local Supabase stack (Docker Desktop required)          |
+| `npm run db:stop`         | Stop the local Supabase stack                                     |
+| `npm run db:reset`        | Drop, recreate and re-migrate the local database                  |
+| `npm run db:push`         | Push migrations to the linked project                             |
+| `npm run db:types`        | Regenerate `src/types/database.ts` from the local stack           |
+| `npm run format`          | Prettier write                                                    |
+| `npm run format:check`    | Prettier check                                                    |
 
 ## Project structure
 
@@ -88,13 +96,30 @@ src/
 │  ├─ validation/         Shared Zod schemas (Phase 2)
 │  └─ security/           Role definitions and authorization helpers
 ├─ services/              Domain services (Phase 2+)
-├─ types/                 Generated database types
+├─ types/                 Generated database types (see src/types/database.ts)
 └─ utils/                 Small shared utilities
 supabase/
-└─ migrations/            Empty until Phase 2
+├─ config.toml            Local Supabase CLI configuration
+├─ migrations/            Ordered SQL migrations (090000–100000)
+├─ seed.sql               Development subscription plans (no accounts)
+└─ README.md              Database workflow and role notes
 tests/
-└─ unit/                  Unit tests
+├─ unit/                  Unit tests (Vitest)
+└─ db/                    PostgreSQL schema and RLS tests (PGlite)
 ```
+
+## Database
+
+Phase 2 ships a multi-tenant PostgreSQL schema (21 tables plus one public view), deny-by-default client grants, and deny-by-default RLS. Authorization for tenant flows lives in Postgres; the proxy still only refreshes sessions.
+
+- **Tenant root:** `restaurants`, keyed by slug, reviewed by a platform admin before it goes live (`pending/approved/rejected`), with `active/suspended` operational state.
+- **QR tokens:** `restaurant_tables.qr_token` is 64 hex characters generated from two random UUIDs; it is a bearer secret, never sequential.
+- **Table sessions:** one open session per table, enforced by a partial unique index. Guests scan a QR code and join; staff approve and close. Multiple guests may share a pending/active session without individual approvals.
+- **Orders:** only while the table session is active; item snapshots are taken server-side at insert time; totals are recomputed from items, never from the current menu price.
+- **Payments:** stored separately from order status; schema-ready for Snippe integration, but no payment processing exists yet.
+- **Subscriptions:** platform-wide plans with `table_limit` snapshotted onto each restaurant; the table-limit trigger enforces it at insert time.
+
+See `supabase/README.md` for how to apply migrations and `PROJECT_STATUS.md` for the exact migration list, policy inventory and test evidence.
 
 ## Roles
 

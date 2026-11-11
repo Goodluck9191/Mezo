@@ -11,5 +11,9 @@ export default defineConfig({
   test: {
     environment: "node",
     include: ["tests/**/*.test.ts"],
+    // Staging runs against a hosted region; network latency makes the
+    // 5 s default too tight for tests that issue many sequential queries.
+    testTimeout: 30_000,
+    hookTimeout: 120_000,
   },
 });
