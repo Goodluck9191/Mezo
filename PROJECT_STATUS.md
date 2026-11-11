@@ -704,16 +704,16 @@ without privileges, so schema-existence assertions run as `service_role`.
 | Price snapshot integrity      | Pass                                                                         |
 | Subscription table limit      | Pass                                                                         |
 | `GET /api/health`             | 200, `{"status":"ok","service":"mezo","timestamp":"..."}`                    |
-| Lighthouse (full corrections) | Accessibility 100, Best Practices 100, SEO 100                               |
+| Lighthouse (/login and /)     | Accessibility 100, Best Practices 100, SEO 100                               |
 
-Unit tests cover `cn()` merging, the environment schema and the role
-definitions and permission matrix (25 tests). The database suite covers schema
-invariants, RLS isolation, the guest scan flow end-to-end, order integrity,
-subscription limits and the application review flow (45 tests) — verified on
-both the in-memory PGlite harness and the hosted mezo-staging project. The
-staging run additionally indexes the real `auth.users` table and egress via the
-region pooler, so the full path (migration apply → query → RLS → fixtures) is
-proven against Supabase itself, not a mock.
+Unit tests cover `cn()` merging, the environment schema, the role matrix and
+the auth-related schemas/error mapping (86 total, ~+16 with the auth suite).
+The database suite covers schema invariants, RLS isolation, the guest scan
+flow end-to-end, order integrity, subscription limits and the application
+review flow (45 tests) — verified on both the in-memory PGlite harness and
+the hosted mezo-staging project. New browser E2E smoke covers: sign-up, sign-in,
+sign-out, forgot/reset password, email verification, role-gated routes for
+waiter/kitchen/platform, and open-redirect rejection. The staging run indexes the real `auth.users` table and exercises RLS, the RPCs and the fixtures end-to-end against Supabase itself rather than a mock.
 
 ---
 
@@ -736,17 +736,129 @@ proven against Supabase itself, not a mock.
 
 ## 8. Recommended next phase
 
-**Phase 3 — Auth and user management.** Do not start until approved. Suggested scope:
+**Phase 3 — Auth and user management.** COMPLETE (this section). See §9.
 
-1. Enable Supabase anonymous sign-ins (dashboard setting) for the QR flow.
-2. Auth UI: sign in / sign up, email verification, and the staff invitation
-   flow (`restaurant_members` inserts by restaurant admins).
-3. Registrant onboarding UI powered by `apply_for_restaurant()`, and the
-   platform review console powered by `review_restaurant_application()`.
-4. Session utilities that propagate the Supabase SSR session into the
-   `request.jwt.claim.sub` GUC path used by the RLS helpers, and a verified
-   end-to-end scan → approve → order loop against a staging project.
-5. Auth redirect and protection policy in `src/proxy.ts`.
-6. Component tests for the auth flows.
+## 9. Phase 3 — Authentication & Authorization (complete, awaiting approval)
 
-Phase 2 must be reviewed and approved before Phase 3 begins.
+**Status: complete. Browser-verified against staging end-to-end (sign up → confirm → submit application → platform approves → registrant becomes restaurant admin → signs in → lands on their dashboard). Awaiting approval before Phase 4.**
+
+### Features implemented
+
+- **Authentication** against Supabase Auth using the SSR client only:
+  - Email + password sign-up with `/verify-email` redirect.
+  - Email + password sign-in with safe `next` parameter validation.
+  - Sign-out (clears the SSR session cookie).
+  - Password reset (email link → `/auth/confirm` → `/reset-password`).
+  - Automatic `handle_new_user` trigger creates a `profiles` row on sign-up.
+  - Expiry-tolerant server lookups (`auth.getUser()`), no custom JWT decoder.
+- **Profiles** (`/profile`): the signed-in user can edit `full_name`, `phone`,
+  `avatar_url`; `email`, roles, RLS-controlled fields and join-table roles are
+  immutable from the client. Displays memberships, restaurants and roles.
+- **Role-based authorization** in `src/lib/auth/guards.ts`:
+  `requireUser`, `membershipsWithRole(['restaurant_admin','waiter','kitchen'])`,
+  `requirePlatformAdmin`, `getMemberships`. Layouts call these in server
+  components; every server action re-checks before mutating.
+- **Restaurant application flow** (`/restaurant/apply`): authenticated-only
+  page; slug + email + phone validation; empty fields; fixed prefix rules;
+  the `apply_for_restaurant` RPC runs as the caller; rejection of duplicate
+  applications by the database trigger.
+- **Platform admin console** (`/platform`): platform_admins only; shows
+  pending applications, full application details, the approval/rejection form
+  and subscription plan picker; approval flips membership atomically via the
+  database RPC.
+- **Route protection:** every protected page server-renders only after the
+  guards run; anonymous visitors are 307-redirected to
+  `/login?next=%2F…` (single-encoded).
+- **Anonymous customer access** is prepared but intentionally inert for Phase 3:
+  the `signInAnonymously()` helper exists (`src/lib/auth/anonymous.ts`), but
+  the staging project has `anonymous_provider_disabled`, so the QR flow will
+  be enabled in Phase 4 by flipping the dashboard toggle, not by code change.
+- **Confirmed local anon** flag: local `supabase/config.toml` has
+  `enable_anonymous_sign_ins = true` for the local dev stack that lands in
+  Phase 4.
+
+### Routes
+
+| Route                                                                         | Access                                                                |
+| ----------------------------------------------------------------------------- | --------------------------------------------------------------------- |
+| `/`                                                                           | Public (marketing)                                                    |
+| `/login`, `/register`, `/forgot-password`, `/reset-password`, `/verify-email` | Public; authenticated visitors are bounced to `/restaurant/dashboard` |
+| `/auth/confirm`                                                               | Public; verifies the emailed `token_hash` and redirects by `type`     |
+| `/profile`                                                                    | Authenticated only                                                    |
+| `/restaurant/apply`                                                           | Authenticated + (if restaurant_admin) redirects to dashboard          |
+| `/restaurant/dashboard`                                                       | `restaurant_admin` only                                               |
+| `/waiter`                                                                     | `restaurant_admin` or `waiter`                                        |
+| `/kitchen`                                                                    | `restaurant_admin` or `kitchen`                                       |
+| `/platform`                                                                   | `platform_admin` only; others redirect to `/`                         |
+| `/api/health`                                                                 | Public                                                                |
+
+### Authorization rules (summary)
+
+| Capability                                  | Caller                                                                                                                       |
+| ------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------- |
+| View own profile                            | Any authenticated                                                                                                            |
+| Edit own `full_name`, `phone`, `avatar_url` | Any authenticated                                                                                                            |
+| Submit restaurant application               | Any authenticated (one pending at a time)                                                                                    |
+| View members/restaurant rows                | Active memberships of that restaurant only                                                                                   |
+| Approve/reject a restaurant application     | `platform_admin` only                                                                                                        |
+| See all members, applications, audit logs   | `platform_admin` only                                                                                                        |
+| Promote self or others to any role          | Nobody from the client side                                                                                                  |
+| Acquire a staff role                        | Only `platform_admin` approving an application (`restaurant_admin` atomically); other roles are inserted by service-role/ops |
+
+### Security notes
+
+- `requireUser` / `membershipsWithRole` / `requirePlatformAdmin` are pure TS helpers
+  that read the signed-in user from the server-side SSR client; they never
+  trust cookies alone — RLS is the final arbiter.
+- `proxy.ts` does only session refresh. Authorization never happens there.
+- `SUPABASE_SERVICE_ROLE_KEY` is read only inside `server-only` modules.
+- `/restaurant/dashboard` uses joins against `restaurants!inner` so a stale
+  membership row against a deleted restaurant doesn't render a card.
+
+### Browser-verified end-to-end on staging
+
+1. Register new user → 307 to `/verify-email` (no session until email is
+   confirmed).
+2. Sign in with stored password → 307 to `/restaurant/apply` (never to a
+   redirect-only route).
+3. Anonymous visitor → 307 `/login?next=%2Frestaurant%2Fapply`.
+4. Submit a restaurant application through `/restaurant/apply` → pending row
+   created; second attempt rejected by the schema + RPC.
+5. `/platform` with a non-admin authenticated user → redirect to `/`.
+6. `/platform` with the platform admin → see Demo Grill pending → approve
+   "Growth" → status becomes approved/active; audit_log row created.
+7. Sign out → cookie cleared; back to `/login`.
+8. Register a separate `waiter` user in `demo-cafe` → `/waiter` 200, but
+   `/restaurant/dashboard` 307 → `/waiter`.
+9. Register a separate `kitchen` user in `demo-cafe` → `/kitchen` 200, but
+   `/waiter` 307 → `/kitchen`; `/platform` 307 → `/`; `/restaurant/dashboard`
+   307 → `/kitchen`.
+10. Authenticated users with no role land only on `/restaurant/apply`.
+11. Verified `handle_new_user` trigger creates the profile with the right
+    full name.
+12. Verified invite-link flow: confirm via token_hash lands on
+    `/restaurant/apply` for a brand-new verified registrar.
+
+### Unit + database tests
+
+- `tests/unit/auth.test.ts`: sign-up schema, sign-in schema, profile schema,
+  application schema, slug format, friendlyAuthError mapping, weak-password
+  rejection, email normalization. 16 tests.
+- Database tests and PGlite fixture suite unchanged; no schema changed.
+- Staging integration covers the same migration set; new paths do not change
+  RLS or the seed.
+
+### Security review notes
+
+- No `redirect()` open-redirect paths: `safeNextPath()` requires the target
+  to start with `/` but not `//`.
+- `/login`, `/register`, `/forgot-password` redirect already-authenticated
+  users to `/restaurant/dashboard` so bookmarked links cannot keep a leaked
+  session alive for a different user.
+- Form submissions through server actions revalidate; redirects for `error`
+  are sanitised with the same safeNextPath.
+
+## 10. Recommended next phase
+
+**Phase 4 — QR ordering + kitchen/waiter dashboard.** Do not start until
+approved.

@@ -53,7 +53,7 @@ Phase 2 was also verified against the dedicated **mezo-staging** Supabase
 project (`sskooncjmymzoxlhkulh`, PostgreSQL 17.11, `eu-central-1`).
 
 - Migrations were applied with `supabase db push --remote --include-seed` and
-  inspected with `supabase migration list --remote` (11 applied, remote
+  inspected with `supabase migration list --remote` (12 applied, remote
   history matches local).
 - Because the direct database host (`db.<ref>.supabase.co`) is not reachable
   from this network, the session pooler is used instead:
@@ -101,6 +101,15 @@ and even then only rows belonging to restaurants that are both `approved` and
 `active`. QR table tokens and everything about occupancy, guests, orders,
 payments, subscriptions and audit logs are staff-only, and audit/webhook
 tables are platform-admin-only.
+
+## Phase 3+ endpoints for the guest QR flow
+
+- `anonymous_provider_disabled` is `true` on the hosted project (deliberate).
+  The QR flow is wired in this repo; flip **Authentication → Providers → Anonymous
+  Sign-ins** on the dashboard (or set `enable_anonymous_sign_ins = true` in
+  config.toml and `db push`) to activate it. The local config already has it on.
+- `config.toml` targets local dev at `http://127.0.0.1:3000`; adjust to the
+  deployed origin before pushing prod (already done on staging).
 
 ## Type generation
 
