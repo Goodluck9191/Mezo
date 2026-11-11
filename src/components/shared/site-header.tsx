@@ -62,7 +62,17 @@ export function SiteHeader() {
           <ThemeToggle />
 
           <Link
-            href="#get-started"
+            href="/login"
+            className={cn(
+              buttonVariants({ variant: "secondary", size: "sm" }),
+              "hidden sm:inline-flex",
+            )}
+          >
+            Sign in
+          </Link>
+
+          <Link
+            href="/register"
             className={cn(buttonVariants({ size: "sm" }), "hidden sm:inline-flex")}
           >
             Get started
@@ -102,7 +112,15 @@ export function SiteHeader() {
           ))}
 
           <Link
-            href="#get-started"
+            href="/login"
+            onClick={() => setIsOpen(false)}
+            className={cn(buttonVariants({ variant: "secondary", size: "md" }), "mt-2 w-full")}
+          >
+            Sign in
+          </Link>
+
+          <Link
+            href="/register"
             onClick={() => setIsOpen(false)}
             className={cn(buttonVariants({ size: "md" }), "mt-2 w-full")}
           >

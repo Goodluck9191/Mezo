@@ -4,7 +4,7 @@ Multi-restaurant QR ordering SaaS for dine-in restaurants in Tanzania.
 
 **SMART DINING. SIMPLE SERVICE.**
 
-> **Status: Phase 2 — database architecture and security.** The schema, RLS, helpers, triggers, migrations and executable tests are in place. There is no application UI for auth, ordering or payments yet; the landing page describes the planned product and is not a live service.
+> **Status: Phase 3 — authentication and authorization in place.** Sign-in, registration, email verification, password reset, profile management, restaurant application, role-based staff consoles and a platform-admin review console are working end-to-end. The customer QR ordering UI is not yet live.
 
 ## Stack
 
@@ -76,24 +76,28 @@ Never commit `.env.local` or real keys. The service-role key must only be import
 src/
 ├─ app/
 │  ├─ (marketing)/        Public landing page and marketing layout
-│  ├─ (auth)/             Sign-in, invitations, callbacks (Phase 3)
+│  ├─ (auth)/             Login, register, forgot/reset password, verify email, profile
+│  ├─ auth/confirm/       Email verification + invite token handler
+│  ├─ (restaurant-admin)/ Restaurant apply and dashboard (Phase 3)
+│  ├─ (staff)/            Waiter and kitchen consoles (Phase 3)
+│  ├─ platform/           Platform-admin application review console (Phase 3)
 │  ├─ (customer)/         QR menu, cart, order tracking (Phase 5)
-│  ├─ (staff)/            Waiter and kitchen views (Phase 6)
-│  ├─ (restaurant-admin)/ Menu, tables, staff, settings (Phase 4)
-│  ├─ platform/           Platform administrator (Phase 3)
 │  └─ api/
 │     └─ health/          Liveness endpoint
+│  └─ actions/            Server actions (auth, application review, profile)
 ├─ components/
-│  ├─ ui/                 Reusable primitives (button, icons)
+│  ├─ ui/                 Reusable primitives (button, icons, input, select, textarea)
 │  ├─ shared/             Header, footer, logo, theme toggle
-│  ├─ customer/           Customer feature components
+│  ├─ auth/               Sign-in/up forms, profile editor, verification page bits
+│  ├─ customer/           Customer feature components (Phase 5)
 │  ├─ staff/              Staff feature components
 │  ├─ restaurant/         Restaurant administration components
 │  └─ platform/           Platform administration components
 ├─ lib/
 │  ├─ env/                Typed, Zod-validated environment
 │  ├─ supabase/           Browser, server, admin, and proxy clients
-│  ├─ validation/         Shared Zod schemas (Phase 2)
+│  ├─ auth/               requireUser / membershipsWithRole / isPlatformAdmin guards
+│  ├─ validation/         Zod schemas (forms, auth, registration, profile)
 │  └─ security/           Role definitions and authorization helpers
 ├─ services/              Domain services (Phase 2+)
 ├─ types/                 Generated database types (see src/types/database.ts)
@@ -105,12 +109,12 @@ supabase/
 └─ README.md              Database workflow and role notes
 tests/
 ├─ unit/                  Unit tests (Vitest)
-└─ db/                    PostgreSQL schema and RLS tests (PGlite)
+└─ db/                    PostgreSQL schema and RLS tests (PGlite + Supabase staging)
 ```
 
 ## Database
 
-Phase 2 ships a multi-tenant PostgreSQL schema (21 tables plus one public view), deny-by-default client grants, and deny-by-default RLS. Authorization for tenant flows lives in Postgres; the proxy still only refreshes sessions.
+Phase 2 ships a multi-tenant PostgreSQL schema (21 tables plus one public view), deny-by-default client grants, and deny-by-default RLS. Authorization for tenant flows lives in Postgres; the proxy only refreshes sessions. Phase 3 adds server-side route guards in `src/lib/auth/guards.ts` — both the layouts and the server actions re-check before touching data. The proxy deliberately stays blind to roles.
 
 - **Tenant root:** `restaurants`, keyed by slug, reviewed by a platform admin before it goes live (`pending/approved/rejected`), with `active/suspended` operational state.
 - **QR tokens:** `restaurant_tables.qr_token` is 64 hex characters generated from two random UUIDs; it is a bearer secret, never sequential.
@@ -134,12 +138,26 @@ Defined once in `src/lib/security/roles.ts` and validated with Zod in `src/lib/v
 
 `restaurant_admin` replaces the previous separate `owner` and `manager` roles. The person who registers a restaurant becomes its first `restaurant_admin` once a platform administrator approves the application.
 
+## Authentication & authorization
+
+Server-side guards in `src/lib/auth/guards.ts` implement the checks below. None of them trust client-supplied IDs, tokens, or roles.
+
+| Entry point                          | Allows                                                                                   |
+| ------------------------------------ | ---------------------------------------------------------------------------------------- |
+| `getUser()` / `requireUser(next?)`   | Any authenticated session; redirects to `/login?next=…` otherwise.                       |
+| `membershipsWithRole(userId, roles)` | User's memberships scoped to the requested roles. Used by waiter/kitchen/admin consoles. |
+| `requirePlatformAdmin(fallback?)`    | `platform_admins` table check; non-platform users are sent away.                         |
+| `isPlatformAdmin()`                  | Boolean platform-admin predicate (server actions, e.g. application review).              |
+
+The `/auth/confirm` route verifies the email confirmation/invitation/reset `token_hash` with `verifyOtp()` and redirects by token `type`. The `/login`, `/register` and `/forgot-password` pages redirect already-authenticated users to their dashboard. The proxy refreshes the session cookie only; no authorization decisions happen there.
+
 ## Architecture notes
 
-- **Authorization is enforced by Postgres RLS.** The proxy only refreshes sessions.
+- **Authorization is enforced by Postgres RLS.** Layouts and actions both re-check before touching data; the proxy refreshes sessions only.
+- **Guards are server-only and call `server-only`.** They are invisible to the client bundle.
 - **Role helpers are a convenience layer.** `hasPermission()` decides what to render and fails fast; it is never the security boundary.
 - **The service-role key is server-only.** It lives in `src/lib/supabase/admin.ts` behind `server-only`.
-- **Tenant isolation, pricing, table limits, and payment verification are backend concerns.** None are implemented yet.
+- **Tenant isolation, pricing, table limits, and payment verification are backend concerns.** Table limits are enforced; pricing and tenant isolation are done by RLS. Order-status transitions are trigger-enforced.
 - **Secrets are never committed.** `.env.example` contains placeholders only.
 
 ## Health check
@@ -158,4 +176,4 @@ curl http://localhost:3000/api/health
 
 ## Next phase
 
-Phase 2 will add the Supabase schema, RLS policies, helper functions, plan seed data, pgTAP tests, and generated types. See `PROJECT_STATUS.md`.
+**Phase 4 — QR ordering, table sessions, and real-time kitchen/waiter flow.** Do not start until approved. See `PROJECT_STATUS.md`.
