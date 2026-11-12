@@ -59,12 +59,20 @@ create table if not exists auth.users (
   created_at timestamptz not null default now()
 );
 
+create or replace function auth.jwt()
+returns jsonb
+stable
+language sql
+as $$
+  select coalesce(nullif(current_setting('request.jwt.claims', true), '')::jsonb, '{}'::jsonb);
+$$;
+
 create or replace function auth.uid()
 returns uuid
-language sql
 stable
+language sql
 as $$
-  select nullif(current_setting('request.jwt.claim.sub', true), '')::uuid;
+  select nullif(auth.jwt() ->> 'sub', '')::uuid;
 $$;
 
 create role anon nologin noinherit;
@@ -72,6 +80,7 @@ create role authenticated nologin noinherit;
 create role service_role nologin noinherit bypassrls;
 
 grant usage on schema auth to anon, authenticated, service_role;
+grant execute on function auth.jwt() to anon, authenticated, service_role;
 grant execute on function auth.uid() to anon, authenticated, service_role;
 `;
 
@@ -200,13 +209,25 @@ async function runInTransaction(
   userId: string | null,
   sql: string,
   params: unknown[],
+  isAnonymous: boolean,
 ): Promise<{
   rows: Record<string, unknown>[];
   affectedRows?: number;
 }> {
   await db.exec("begin;");
   await db.exec(`set local role ${role};`);
-  await db.exec(`select set_config('request.jwt.claim.sub', '${userId ?? ""}', true)`);
+  const claims = userId
+    ? JSON.stringify({
+        sub: userId,
+        aud: "authenticated",
+        role: "authenticated",
+        is_anonymous: isAnonymous,
+      })
+    : "{}";
+  if (userId) {
+    await db.exec(`select set_config('request.jwt.claim.sub', '${userId}', true)`);
+  }
+  await db.exec(`select set_config('request.jwt.claims', '${claims}', true)`);
   try {
     const result = await db.query(sql, params);
     await db.exec("commit;");
@@ -224,8 +245,9 @@ export async function queryRows<T extends Record<string, unknown>>(
   userId: string | null,
   sql: string,
   params: unknown[] = [],
+  isAnonymous = false,
 ): Promise<T[]> {
-  const result = await runInTransaction(db, role, userId, sql, params);
+  const result = await runInTransaction(db, role, userId, sql, params, isAnonymous);
   return result.rows as T[];
 }
 
@@ -236,8 +258,9 @@ export async function runAs(
   userId: string | null,
   sql: string,
   params: unknown[] = [],
+  isAnonymous = false,
 ) {
-  return runInTransaction(db, role, userId, sql, params);
+  return runInTransaction(db, role, userId, sql, params, isAnonymous);
 }
 
 /** Expects the statement to fail; returns the SQLSTATE and message. */
@@ -247,10 +270,22 @@ export async function expectSqlFailure(
   userId: string | null,
   sql: string,
   params: unknown[] = [],
+  isAnonymous = false,
 ): Promise<{ code?: string; message: string }> {
   await db.exec("begin;");
   await db.exec(`set local role ${role};`);
-  await db.exec(`select set_config('request.jwt.claim.sub', '${userId ?? ""}', true)`);
+  const claims = userId
+    ? JSON.stringify({
+        sub: userId,
+        aud: "authenticated",
+        role: "authenticated",
+        is_anonymous: isAnonymous,
+      })
+    : "{}";
+  if (userId) {
+    await db.exec(`select set_config('request.jwt.claim.sub', '${userId}', true)`);
+  }
+  await db.exec(`select set_config('request.jwt.claims', '${claims}', true)`);
   try {
     await db.query(sql, params);
     throw new Error("Expected the statement to fail, but it succeeded.");

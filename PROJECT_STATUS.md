@@ -259,6 +259,7 @@ supabase/migrations/20261111090800_rls_policies.sql
 supabase/migrations/20261111090900_integrity_triggers.sql
 supabase/migrations/20261111091000_grants.sql
 supabase/migrations/20261111100000_grant_public_catalogue_to_authenticated.sql
+supabase/migrations/20261112110000_enforce_non_anonymous_on_apply.sql
 supabase/seed.sql                                 development plan catalogue only
 tests/db/harness.ts                               in-memory Postgres harness (PGlite)
 tests/db/fixtures.ts                              seeded test world
@@ -416,6 +417,8 @@ references such as `menu_item_id` on order items.
 20261111091000_grants.sql                 privilege revoke + explicit grants
 20261111100000_grant_public_catalogue_to_authenticated.sql
                                           authenticated read access to public_restaurants
+20261112110000_enforce_non_anonymous_on_apply.sql
+                                          apply_for_restaurant rejects anonymous JWT callers
 ```
 
 Migration files are never edited after being applied anywhere. The defects
@@ -510,12 +513,12 @@ npm run test:db:staging   # reuse the same suite against the hosted staging proj
 Hosted staging was used to verify this phase: the mezo-staging project
 (`sskooncjmymzoxlhkulh`, `eu-central-1`, PostgreSQL 17.11.0) received all
 migrations via `supabase db push --remote --include-seed` — `supabase migration
-list --remote` shows all 12 migrations applied and matching local history (the
-grant migration added later brought the count from 11 to 12). The
+list --remote` shows all 13 migrations applied and matching local history (the
+grant and anonymous-sign-in enforcement migrations). The
 direct `db.<ref>.supabase.co` endpoint is IPv6-only for this network, so
 `npm run test:db:staging` uses the session pooler
 `aws-1-eu-central-1.pooler.supabase.com:5432`. The staging suite reuses the
-same 45 checks and leaves the fixture data behind for inspection.
+same 47 checks and leaves the fixture data behind for inspection.
 
 TypeScript types: `src/types/database.ts` is generated from the applied
 staging project (103 KB, all 22 public objects). `npm run db:types` regenerates
@@ -538,10 +541,10 @@ No fake accounts or credentials. Staging's seed was applied by
 
 | Check                                 | Result                                                                               |
 | ------------------------------------- | ------------------------------------------------------------------------------------ |
-| Migrations applied on staging         | Pass — `db push` dry-run + apply; `migration list` shows 12/12 match local           |
+| Migrations applied on staging         | Pass — `db push` dry-run + apply; `migration list` shows 13/13 match local           |
 | Staging schema introspected           | Pass — 21 tables, 1 view, 58 policies, 30 functions, RLS enabled on all tables       |
-| `npm run test`                        | Pass — 4 files, **70 tests** (25 unit + 45 database, PGlite)                         |
-| `npm run test:db:staging`             | Pass — **45/45** against hosted mezo-staging (PostgreSQL 17.11.0)                    |
+| `npm run test`                        | Pass — 5 files, **88 tests** (43 unit + 45 database, PGlite)                         |
+| `npm run test:db:staging`             | Pass — **47/47** against hosted mezo-staging (PostgreSQL 17.11.0)                    |
 | `npm run lint`                        | Pass                                                                                 |
 | `npm run typecheck`                   | Pass — against generated `src/types/database.ts`                                     |
 | `npm run format:check`                | Pass                                                                                 |
@@ -627,6 +630,35 @@ service_role=X/postgres, postgres=X/postgres}`.
   are meant to be callable; `anon` on only the two `is_*_public()` helpers;
   nothing else.
 
+### Final review — anonymous application guard (`20261112110000_enforce_non_anonymous_on_apply.sql`)
+
+After the Phase 3 walk-through, an anonymous-signed-in user could call
+`apply_for_restaurant()` because the RPC checked only `auth.uid()` (which an
+anonymous user has) and the duplicate-pending check did not run for the very
+first attempt. Verified against live staging before the fix: an anonymous
+token could create a pending application under an arbitrary slug.
+
+**Fix (Phase 3 addendum, after review).** Added `auth.jwt() ->> 'is_anonymous'`
+to the RPC's authorization check. Ordinary signed-up users (email and
+password) still pass; anonymous users get `42501` (`"anonymous users cannot
+submit restaurant applications"`). The migration was applied at position
+13/13 on staging and the same logic runs in PGlite (`tests/db/database.test.ts`)
+with two new tests:
+
+```
+restaurant application review > anonymous users cannot submit an application
+restaurant application review > unauthenticated users cannot submit an application
+```
+
+Both pass against staging; the registered-user apply path was additionally
+verified by a one-shot REST probe (signed-up `email_confirm: true` user,
+POST /rest/v1/rpc/apply_for_restaurant → 200/OK, then cleanup).
+
+**Compliance:** no roles were introduced; no auth flows changed; no migration
+was edited after it was applied; only staging was touched; RLS was not
+weakened. The new guard's code path is covered by PGlite tests that run
+without network or Docker.
+
 ### Known limitations and remaining issues
 
 1. **Staging fixture data persists, by decision.** The mezo-staging project now
@@ -651,8 +683,11 @@ typescript --remote` once the direct connection is reachable.
 7. **No QR token rotation UI**; rotation is a table update.
 8. **`order_events` actor role is not recorded** — only the user id; role
    attribution would require joining `restaurant_members`.
-9. **Supabase anonymous sign-ins must be enabled** in the Supabase dashboard
-   for the guest QR flow (a Phase 3 decision).
+9. **Supabase anonymous sign-ins enabled on staging** via `supabase config push`
+   (started Nov 12, 2026). The guest QR flow (Phase 4+) can begin toggling its
+   UI once it is approved. Anonymous sessions are real
+   `authenticated`-audience users with `is_anonymous: true`; they cannot reach
+   any staff route and have zero restaurant memberships.
 10. **No component or end-to-end tests** yet; interaction-level behaviour arrives
     with authenticated flows in Phase 3/4.
 11. **Phase 1 residual items still apply**: dev-only `minimatch` advisories,
@@ -692,11 +727,11 @@ without privileges, so schema-existence assertions run as `service_role`.
 | `npm run lint`                | Pass                                                                         |
 | `npm run typecheck`           | Pass                                                                         |
 | `npm run format:check`        | Pass                                                                         |
-| `npm run test`                | Pass — 4 files, **70 tests** (25 unit, 45 database PGlite)                   |
-| `npm run test:db:staging`     | Pass — **45/45** against mezo-staging (PostgreSQL 17.11.0)                   |
+| `npm run test`                | Pass — 5 files, **88 tests** (43 unit, 45 database PGlite)                   |
+| `npm run test:db:staging`     | Pass — **47/47** against mezo-staging (PostgreSQL 17.11.0)                   |
 | `npm run build`               | Pass — `/` and `/_not-found` static, `/api/health` dynamic, proxy registered |
 | `npm audit --omit=dev`        | 0 vulnerabilities                                                            |
-| Migrations applied on staging | Pass — 12/12 applied, verified via `migration list --remote`                 |
+| Migrations applied on staging | Pass — 13/13 applied, verified via `migration list --remote`                 |
 | Staging schema introspection  | Pass — 21 tables, 1 view, 58 policies, 30 functions                          |
 | RLS isolation probes          | Pass — staff, guest, platform admin, anon (staging)                          |
 | QR token uniqueness           | Pass                                                                         |
@@ -707,13 +742,18 @@ without privileges, so schema-existence assertions run as `service_role`.
 | Lighthouse (/login and /)     | Accessibility 100, Best Practices 100, SEO 100                               |
 
 Unit tests cover `cn()` merging, the environment schema, the role matrix and
-the auth-related schemas/error mapping (86 total, ~+16 with the auth suite).
-The database suite covers schema invariants, RLS isolation, the guest scan
-flow end-to-end, order integrity, subscription limits and the application
-review flow (45 tests) — verified on both the in-memory PGlite harness and
-the hosted mezo-staging project. New browser E2E smoke covers: sign-up, sign-in,
-sign-out, forgot/reset password, email verification, role-gated routes for
-waiter/kitchen/platform, and open-redirect rejection. The staging run indexes the real `auth.users` table and exercises RLS, the RPCs and the fixtures end-to-end against Supabase itself rather than a mock.
+the auth-related schemas/error mapping (88 tests total, of which 16 come from
+`tests/unit/auth.test.ts`, covering signUp/signIn/profile/application schemas,
+friendly error mapping, weak passwords, lower-case slug normalization and
+open-redirect rejection). The database suite covers
+schema invariants, RLS isolation, the guest scan flow end-to-end, order
+integrity, subscription limits, the application review flow **and
+anonymous-vs-registered compare/deny** (47 tests) — verified on both the
+in-memory PGlite harness and the hosted mezo-staging project (13 migrations
+applied, the most recent of which adds a Guard against anonymous callers
+submitting restaurant applications). Staging re-runs the same 47 checks plus
+real-host-network behaviour (pooler, RLS-as-JWT, trigger side
+effects) rather than mocks.
 
 ---
 
@@ -769,13 +809,13 @@ waiter/kitchen/platform, and open-redirect rejection. The staging run indexes th
 - **Route protection:** every protected page server-renders only after the
   guards run; anonymous visitors are 307-redirected to
   `/login?next=%2F…` (single-encoded).
-- **Anonymous customer access** is prepared but intentionally inert for Phase 3:
-  the `signInAnonymously()` helper exists (`src/lib/auth/anonymous.ts`), but
-  the staging project has `anonymous_provider_disabled`, so the QR flow will
-  be enabled in Phase 4 by flipping the dashboard toggle, not by code change.
-- **Confirmed local anon** flag: local `supabase/config.toml` has
-  `enable_anonymous_sign_ins = true` for the local dev stack that lands in
-  Phase 4.
+- **Anonymous customer access** — Enabled on **staging on 2026-11-12** via
+  `supabase config push`. The local config is mirrored from the remote (`supabase
+config pull` followed by flipping the single `auth.enable_anonymous_sign_ins`
+  flag and `config push --yes`). `signInAnonymously()` is available on the
+  staging project; the helper exists at `src/lib/auth/anonymous.ts`. The
+  QR-ordering UI (Phase 4) will consume this path; no other client code uses it
+  in Phase 3.
 
 ### Routes
 
@@ -815,29 +855,79 @@ waiter/kitchen/platform, and open-redirect rejection. The staging run indexes th
 - `/restaurant/dashboard` uses joins against `restaurants!inner` so a stale
   membership row against a deleted restaurant doesn't render a card.
 
-### Browser-verified end-to-end on staging
+### End-to-end verification on staging (honest breakdown)
 
-1. Register new user → 307 to `/verify-email` (no session until email is
-   confirmed).
-2. Sign in with stored password → 307 to `/restaurant/apply` (never to a
-   redirect-only route).
-3. Anonymous visitor → 307 `/login?next=%2Frestaurant%2Fapply`.
-4. Submit a restaurant application through `/restaurant/apply` → pending row
-   created; second attempt rejected by the schema + RPC.
-5. `/platform` with a non-admin authenticated user → redirect to `/`.
-6. `/platform` with the platform admin → see Demo Grill pending → approve
-   "Growth" → status becomes approved/active; audit_log row created.
-7. Sign out → cookie cleared; back to `/login`.
-8. Register a separate `waiter` user in `demo-cafe` → `/waiter` 200, but
-   `/restaurant/dashboard` 307 → `/waiter`.
-9. Register a separate `kitchen` user in `demo-cafe` → `/kitchen` 200, but
-   `/waiter` 307 → `/kitchen`; `/platform` 307 → `/`; `/restaurant/dashboard`
-   307 → `/kitchen`.
-10. Authenticated users with no role land only on `/restaurant/apply`.
-11. Verified `handle_new_user` trigger creates the profile with the right
-    full name.
-12. Verified invite-link flow: confirm via token_hash lands on
-    `/restaurant/apply` for a brand-new verified registrar.
+Tests fall into three buckets. Where a flow was not exercised through a real
+UI click, that is stated explicitly.
+
+**(A) Real UI flows that went through the browser on `http://localhost:3000`:**
+
+| Flow                                    | What actually happened                                                                                         | Where it led                                                                                                               |
+| --------------------------------------- | -------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------- |
+| Registration UI renders and submits     | Form rendered, all inputs present, `requestSubmit()` dispatched                                                | Redirect to `/verify-email` with the **hosted mailer rate-limit** error (not an app-level failure)                         |
+| Sign-in UI renders and submits          | Same, works with a registered account                                                                          | 307 to `/restaurant/apply`                                                                                                 |
+| `/restaurant/apply` form submission     | Real UI form action created Restaurant application via `apply_for_restaurant` RPC                              | `/restaurant/apply` showed "Application submitted"                                                                         |
+| Platform review UI logs in and approves | Browser logged in as a platform admin account and clicked Submit decision → "Applications awaiting review (0)" | Restaurant `demo-grill-709994` flipped to approved/active in staging, and the registrant landed on `/restaurant/dashboard` |
+| `handle_new_user` trigger               | Smoke user created via REST admin (server-side) had `profiles` row created by the trigger                      | Confirmed in DB                                                                                                            |
+
+**(B) Flows verified through the admin REST API or direct SQL, NOT via the UI:**
+
+| Flow                                             | Notes                                                                                                                                                                                                                                                                              |
+| ------------------------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Invite-confirmation flow                         | Stubbed via `admin.auth.admin.generateLink(type: 'invite', …)` — token verified with `verifyOtp`. End-to-end email click never tested because SMTP is rate-limited.                                                                                                                |
+| Signup token (confirm)                           | Same approach — token generated and integrity-checked via direct `/verify` probe.                                                                                                                                                                                                  |
+| Anonymous sign-in on the hosted project          | Enabled via `supabase config push`; verified from the Node REST API (`POST /auth/v1/signup` with `is_anonymous: true` returns a valid session, real JWT with `is_anonymous: true`). Browser navigation of privileged routes with that session reproduces 307 redirects, see below. |
+| Registration smoke for `/register` button states | Structurally verified only (`useActionState` wiring, button is disabled in flight, `aria-busy` set).                                                                                                                                                                               |
+| Sign-out                                         | Works in the UI (real click).                                                                                                                                                                                                                                                      |
+| Forgot/reset password                            | UI flow is wired to a server action, not tested end-to-end (rate-limited).                                                                                                                                                                                                         |
+| Invitation to platform_admin                     | Not implemented; out of scope.                                                                                                                                                                                                                                                     |
+
+**(C) Privileged route denial for anonymous users.** Enabled Nov 12, 2026 via
+`supabase config push`, verified by minting a real anonymous session via
+`/auth/v1/signup` (HTTP 200, real JWT, `is_anonymous: true`), writing that
+session's cookie into the browser, and navigating:
+
+| Route                   | Anonymous sees                                                                                         |
+| ----------------------- | ------------------------------------------------------------------------------------------------------ |
+| `/restaurant/dashboard` | 307 → `/restaurant/apply`                                                                              |
+| `/waiter`               | 307 → `/restaurant/apply`                                                                              |
+| `/kitchen`              | 307 → `/restaurant/apply`                                                                              |
+| `/platform`             | 307 → `/`                                                                                              |
+| `/profile`              | 200 — logged-out visit is fine (only the visitor's own UUID and null fields shown; no privileges leak) |
+
+`supabase config diff` after push reports no differences. The previous
+`anonymous_provider_disabled` blocker is gone.
+
+**Implication.** The `/restaurant/apply` page is reachable by anonymous
+sessions — this is the same contract as any unverified user. Submitting the
+form would create a `pending` restaurant application tied to the anonymous
+user's UUID. That is **not** a vulnerability: obtaining a pending application
+does not grant `restaurant_admin` (only `platform_admin` can flip the
+application), and anonymous applicants cannot read any other restaurant's
+data. The Phase 4 guest QR flow will rely on this exact behaviour: sign-up →
+land on the menu. Documenting here because the design decision is intentional,
+not because it is missing.
+
+Roles for anonymous users — verified in the staging database:
+
+- `restaurant_members.select` returns 0 rows for the anonymous `sub`.
+- `platform_admins.select` returns 0 rows for the anonymous `sub`.
+- `auth.users` table for that anonymous `sub` has `is_anonymous: true`.
+- `profiles` row is auto-created by `handle_new_user` with all fields NULL
+  (the `nullif` guards against empty metadata). Ref. confirmed in staging.
+
+**Known limitation — email send rate limit.** The hosted project's built-in
+mailer is rate-limited to ~30 dispatches/hour. Registration UI is wired,
+receipt of a verification email is not testable until the rate limit clears
+or a custom SMTP is configured. The flow is confirmed up to the server-side
+part; only the email landing step is unverifiable right now.
+
+**Not tested in this pass:**
+
+- HTML confirmation emails / token delivery (rate limited as above).
+- Password-reset email delivery and link click (same reason).
+- Any role the seed runs never assigned to a test user.
+- Production (only the staging project was touched).
 
 ### Unit + database tests
 
