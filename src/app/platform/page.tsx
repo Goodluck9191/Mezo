@@ -1,4 +1,5 @@
 import type { Metadata } from "next";
+import Link from "next/link";
 
 import { Logo } from "@/components/shared/logo";
 import { ApplicationReviewForm } from "@/components/platform/application-review-form";
@@ -59,6 +60,31 @@ export default async function PlatformPage() {
           Platform administration
         </p>
       </div>
+
+      <nav
+        aria-label="Platform sections"
+        className="mt-4 flex flex-wrap items-center gap-2 text-sm"
+      >
+        <Link
+          href="/platform"
+          aria-current="page"
+          className="rounded-full bg-accent/10 px-3.5 py-1.5 text-xs font-semibold text-accent"
+        >
+          Applications
+        </Link>
+        <Link
+          href="/platform/subscriptions"
+          className="rounded-full border border-border px-3.5 py-1.5 text-xs font-medium text-foreground transition-colors hover:bg-surface"
+        >
+          Subscriptions
+        </Link>
+        <Link
+          href="/platform/plans"
+          className="rounded-full border border-border px-3.5 py-1.5 text-xs font-medium text-foreground transition-colors hover:bg-surface"
+        >
+          Plan catalogue
+        </Link>
+      </nav>
 
       <h1 className="mt-4 text-2xl font-semibold tracking-tight sm:text-3xl">
         Restaurant applications

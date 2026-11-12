@@ -53,18 +53,19 @@ Phase 2 was also verified against the dedicated **mezo-staging** Supabase
 project (`sskooncjmymzoxlhkulh`, PostgreSQL 17.11, `eu-central-1`).
 
 - Migrations were applied with `supabase db push --remote` and inspected with
-  `supabase migration list --remote` (**16 applied, remote history matches
+  `supabase migration list --remote` (**17 applied, remote history matches
   local**; includes `20261112110000_enforce_non_anonymous_on_apply.sql`,
   `20261112120000_staff_invitations.sql`,
-  `20261112130000_invitation_fixes.sql`, and
-  `20261112140000_restrict_slug_and_anonymous_accept.sql`; the storage bucket
+  `20261112130000_invitation_fixes.sql`,
+  `20261112140000_restrict_slug_and_anonymous_accept.sql`, and
+  `20261112150000_subscription_management.sql`; the storage bucket
   `restaurant-logos` was created by migration 14).
 - Because the direct database host (`db.<ref>.supabase.co`) is not reachable
   from this network, the session pooler is used instead:
   `aws-1-eu-central-1.pooler.supabase.com:5432`.
   `.env.local` (git-ignored, never committed) carries `MEZO_STAGING_PROJECT_REF`,
   `NEXT_PUBLIC_SUPABASE_URL`, keys, and `SUPABASE_DB_PASSWORD`.
-- Run the same 74 checks against staging:
+- Run the same 93 checks against staging:
 
   ```bash
   npm run test:db:staging
@@ -72,9 +73,9 @@ project (`sskooncjmymzoxlhkulh`, PostgreSQL 17.11, `eu-central-1`).
 
   This reuses the shared suite through `tests/db/staging.test.ts` with a
   transaction-scoped `SET LOCAL ROLE` probe (the pooled session does not
-  preserve `SET ROLE` across statements). 74 = 47 Phase 3 checks + 27 Phase 4
+  preserve `SET ROLE` across statements). 93 = 47 Phase 3 checks + 46 Phase 4/5
   checks (profile update, tenant isolation, invitation lifecycle, deactivation,
-  multi-membership, slug immutability).
+  multi-membership, slug immutability, subscription lifecycle and limits).
 
 - The staging run is **not** idempotent at the fixture level: the suite
   deletes only the fixture slugs and `example.test` users before recreating

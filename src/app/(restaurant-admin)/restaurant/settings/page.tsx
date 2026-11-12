@@ -150,13 +150,13 @@ export default async function RestaurantSettingsPage({
             icon={<QrCodeIcon className="size-5" />}
             title="Menu, tables & QR codes"
             description="Menu management and QR code generation arrive with the ordering phase."
-            badge="Phase 5"
+            badge="Phase 6"
           />
-          <DisabledCard
+          <SettingCard
+            href={`/restaurant/billing${suffix}`}
             icon={<WalletIcon className="size-5" />}
-            title="Billing & subscription"
-            description="Plan enforcement and invoices arrive with the billing phase."
-            badge="Later phase"
+            title="Subscription & billing"
+            description="Your plan, table limit, usage, status and payment history."
           />
           <DisabledCard
             icon={<ClipboardListIcon className="size-5" />}

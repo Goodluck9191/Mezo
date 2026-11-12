@@ -35,11 +35,13 @@ const NAV_SECTIONS: ReadonlyArray<{
       { key: "settings", label: "Overview", href: "/restaurant/settings" },
       { key: "profile", label: "Restaurant profile", href: "/restaurant/settings/profile" },
       { key: "staff", label: "Staff", href: "/restaurant/settings/staff" },
+      { key: "billing", label: "Subscription & billing", href: "/restaurant/billing" },
     ],
   },
 ];
 
-export type WorkspaceActive = "dashboard" | "onboarding" | "settings" | "profile" | "staff";
+export type WorkspaceActive =
+  "dashboard" | "onboarding" | "settings" | "profile" | "staff" | "billing";
 
 export function WorkspaceShell({
   userEmail,

@@ -51,7 +51,7 @@ export function registerDatabaseSecuritySuite(target: "pglite" | "staging") {
       expect(unprotected).toEqual([]);
     });
 
-    it("creates all 22 tables and the 5 seeded plans", async () => {
+    it("creates all 22 tables and the 7 seeded plans", async () => {
       // information_schema is filtered by privileges for non-superusers, so
       // check table existence as the service role.
       const tables = await queryRows<{ table_name: string }>(
@@ -87,13 +87,24 @@ export function registerDatabaseSecuritySuite(target: "pglite" | "staging") {
         expect(tables.map((t) => t.table_name)).toContain(name);
       }
 
-      const plans = await queryRows(
+      const plans = await queryRows<{ code: string }>(
         world.db,
         "authenticated",
         world.adminA.id,
-        "select count(*)::int as n from public.subscription_plans where is_active",
+        "select code from public.subscription_plans where is_active",
       );
-      expect(plans[0]?.n).toBe(5);
+      const codes = plans.map((p) => p.code);
+      for (const code of [
+        "starter_monthly",
+        "growth_monthly",
+        "pro_monthly",
+        "starter_yearly",
+        "growth_yearly",
+        "business_monthly",
+        "enterprise_monthly",
+      ]) {
+        expect(codes).toContain(code);
+      }
     });
 
     it("creates a profile for every new auth user", async () => {
@@ -941,13 +952,24 @@ export function registerDatabaseSecuritySuite(target: "pglite" | "staging") {
       );
       expect(items).toEqual([{ name: "Pilau" }]);
 
-      const plans = await queryRows(
+      const plans = await queryRows<{ code: string }>(
         world.db,
         "anon",
         null,
-        "select count(*)::int as n from public.subscription_plans",
+        "select code from public.subscription_plans where is_active",
       );
-      expect(plans[0]?.n).toBe(5);
+      const codes = plans.map((p) => p.code);
+      for (const code of [
+        "starter_monthly",
+        "growth_monthly",
+        "pro_monthly",
+        "starter_yearly",
+        "growth_yearly",
+        "business_monthly",
+        "enterprise_monthly",
+      ]) {
+        expect(codes).toContain(code);
+      }
     });
 
     it("audit_logs is readable by platform admins only and never client-writable", async () => {
@@ -1783,6 +1805,392 @@ export function registerDatabaseSecuritySuite(target: "pglite" | "staging") {
       expect(
         failure.code === "42501" || /anonymous/i.test(failure.message),
         `expected an anonymous-session failure, got: ${failure.message}`,
+      ).toBe(true);
+    });
+  });
+
+  describe("phase 5 — subscriptions", () => {
+    // Each suite run uses a fresh provider reference so the payment tests
+    // behave identically on ephemeral (PGlite) and persistent (staging) targets.
+    const paymentRef = `sn-testref-${crypto.randomUUID().slice(0, 12)}`;
+
+    it("platform admin can create and update a plan in the catalogue", async () => {
+      // Keep the test idempotent: the staging suite re-runs against a persistent database.
+      await world.db.query("delete from public.subscription_plans where code = 'qa_test_plan'");
+      const rows = await queryRows<{ code: string; table_limit: number }>(
+        world.db,
+        "authenticated",
+        world.platformAdmin.id,
+        "select code, table_limit from public.create_subscription_plan($1, $2, $3, $4, 'monthly'::public.billing_interval, 7, true)",
+        ["qa_test_plan", "QA Test Plan", "Temporary test plan", 1000],
+      );
+      expect(rows[0]).toMatchObject({ code: "qa_test_plan", table_limit: 7 });
+
+      const updated = await queryRows<{ table_limit: number; price_tzs: string }>(
+        world.db,
+        "authenticated",
+        world.platformAdmin.id,
+        "select table_limit, price_tzs from public.update_subscription_plan((select id from public.subscription_plans where code = 'qa_test_plan'), $1, $2, $3, 'yearly'::public.billing_interval, 9)",
+        ["QA Test Plan 2", "Updated description", 2000],
+      );
+      expect(updated[0]).toMatchObject({ table_limit: 9 });
+      expect(Number(updated[0]!.price_tzs)).toBe(2000);
+    });
+
+    it("restaurant admin cannot create a plan", async () => {
+      const failure = await expectSqlFailure(
+        world.db,
+        "authenticated",
+        world.adminA.id,
+        "select public.create_subscription_plan($1, $2, $3, $4, 'monthly'::public.billing_interval, 5, true)",
+        ["admin_plan_attempt", "Admin Attempt", "nope", 1],
+      );
+      expectPermission(failure);
+    });
+
+    it("waiter cannot create a plan", async () => {
+      const failure = await expectSqlFailure(
+        world.db,
+        "authenticated",
+        world.waiterA.id,
+        "select public.create_subscription_plan($1, $2, $3, $4, 'monthly'::public.billing_interval, 5, true)",
+        ["waiter_plan_attempt", "Waiter Attempt", "nope", 1],
+      );
+      expectPermission(failure);
+    });
+
+    it("kitchen cannot create a plan", async () => {
+      const failure = await expectSqlFailure(
+        world.db,
+        "authenticated",
+        world.kitchenA.id,
+        "select public.create_subscription_plan($1, $2, $3, $4, 'monthly'::public.billing_interval, 5, true)",
+        ["kitchen_plan_attempt", "Kitchen Attempt", "nope", 1],
+      );
+      expectPermission(failure);
+    });
+
+    it("direct client UPDATE on the plan catalogue is denied", async () => {
+      const failure = await expectSqlFailure(
+        world.db,
+        "authenticated",
+        world.adminA.id,
+        "update public.subscription_plans set table_limit = 9999 where code = 'qa_test_plan'",
+      );
+      expect(
+        failure.code === "42501" || /permission denied/i.test(failure.message),
+        `expected a permission failure, got: ${failure.message}`,
+      ).toBe(true);
+    });
+
+    it("restaurant admin cannot assign itself a different plan", async () => {
+      const failure = await expectSqlFailure(
+        world.db,
+        "authenticated",
+        world.adminA.id,
+        "select public.assign_subscription_plan($1, (select id from public.subscription_plans where code = 'business_monthly'))",
+        [world.restaurantA],
+      );
+      expectPermission(failure);
+    });
+
+    it("a waiter cannot assign a plan either", async () => {
+      const failure = await expectSqlFailure(
+        world.db,
+        "authenticated",
+        world.waiterA.id,
+        "select public.assign_subscription_plan($1, (select id from public.subscription_plans where code = 'business_monthly'))",
+        [world.restaurantA],
+      );
+      expectPermission(failure);
+    });
+
+    it("lowering the plan does not delete existing tables", async () => {
+      // Fixture state entering this test: tiny-diner has 5 tables and an
+      // active Growth subscription (limit 20).
+      await runAs(
+        world.db,
+        "authenticated",
+        world.platformAdmin.id,
+        "select public.assign_subscription_plan($1, (select id from public.subscription_plans where code = 'business_monthly'))",
+        [world.restaurantC],
+      );
+      const businessLimit = await queryRows<{ n: number }>(
+        world.db,
+        "service_role",
+        null,
+        "select s.table_limit::int as n from public.restaurant_subscriptions s where s.restaurant_id = $1 and s.status = 'active'",
+        [world.restaurantC],
+      );
+      expect(businessLimit[0]!.n).toBe(50);
+
+      // Grow the restaurant past its Starter limit of 5 tables.
+      for (const name of ["T6", "T7", "T8", "T9", "T10"]) {
+        await world.db.query(
+          "insert into public.restaurant_tables (restaurant_id, name) values ($1, $2)",
+          [world.restaurantC, name],
+        );
+      }
+
+      // Reassign Starter: limit drops to 5, but every table remains.
+      await runAs(
+        world.db,
+        "authenticated",
+        world.platformAdmin.id,
+        "select public.assign_subscription_plan($1, (select id from public.subscription_plans where code = 'starter_monthly'))",
+        [world.restaurantC],
+      );
+
+      const count = await queryRows<{ n: number }>(
+        world.db,
+        "service_role",
+        null,
+        "select count(*)::int as n from public.restaurant_tables where restaurant_id = $1",
+        [world.restaurantC],
+      );
+      expect(count[0]!.n).toBe(10);
+    });
+
+    it("a restaurant already above its new limit cannot create more tables", async () => {
+      const failure = await expectSqlFailure(
+        world.db,
+        "service_role",
+        null,
+        "insert into public.restaurant_tables (restaurant_id, name) values ($1, 'T7-over-limit')",
+        [world.restaurantC],
+      );
+      expect(failure.code === "23514" || /table limit reached/i.test(failure.message)).toBe(true);
+    });
+
+    it("expired subscriptions block table creation", async () => {
+      // Force expiry of A's current subscription, verify blocked, then restore.
+      await world.db.query(
+        "update public.restaurant_subscriptions set status = 'expired' where restaurant_id = $1 and status = 'active'",
+        [world.restaurantA],
+      );
+
+      const failure = await expectSqlFailure(
+        world.db,
+        "service_role",
+        null,
+        "insert into public.restaurant_tables (restaurant_id, name) values ($1, 'blocked')",
+        [world.restaurantA],
+      );
+      expect(
+        failure.code === "23514" || /not active/i.test(failure.message),
+        `expected an inactive-subscription failure, got: ${failure.message}`,
+      ).toBe(true);
+
+      await runAs(
+        world.db,
+        "authenticated",
+        world.platformAdmin.id,
+        "select public.set_subscription_status($1, 'active'::public.subscription_status)",
+        [world.restaurantA],
+      );
+
+      const restored = await queryRows<{ status: string }>(
+        world.db,
+        "service_role",
+        null,
+        "select status from public.restaurant_subscriptions where restaurant_id = $1 and status = 'active'",
+        [world.restaurantA],
+      );
+      expect(restored).toHaveLength(1);
+    });
+
+    it("restaurant B cannot see restaurant A's subscription", async () => {
+      const rows = await queryRows(
+        world.db,
+        "authenticated",
+        world.adminB.id,
+        "select id from public.restaurant_subscriptions where restaurant_id = $1",
+        [world.restaurantA],
+      );
+      expect(rows).toHaveLength(0);
+    });
+
+    it("a platform admin records a payment and the admin of the restaurant sees it", async () => {
+      const rows = await queryRows(
+        world.db,
+        "authenticated",
+        world.platformAdmin.id,
+        `select id, already_recorded from public.record_subscription_payment($1, $2, 'successful'::public.payment_status, '${paymentRef}', '2026-11-01'::date, '2026-11-30'::date, now(), null)`,
+        [world.restaurantA, 85000],
+      );
+      expect(rows[0]).toMatchObject({ already_recorded: false });
+
+      const visible = await queryRows(
+        world.db,
+        "authenticated",
+        world.adminA.id,
+        "select id, amount_tzs::bigint as amount_tzs, status from public.subscription_payments where restaurant_id = $1",
+        [world.restaurantA],
+      );
+      expect(visible).toHaveLength(1);
+      expect(Number(visible[0]!.amount_tzs)).toBe(85000);
+      expect(visible[0]!.status).toBe("successful");
+    });
+
+    it("payment recording is idempotent on the provider reference", async () => {
+      const rows = await queryRows(
+        world.db,
+        "authenticated",
+        world.platformAdmin.id,
+        `select id, already_recorded from public.record_subscription_payment($1, $2, 'successful'::public.payment_status, '${paymentRef}', '2026-11-01'::date, '2026-11-30'::date, now(), null)`,
+        [world.restaurantA, 85000],
+      );
+      expect(rows[0]).toMatchObject({ already_recorded: true });
+
+      const payments = await queryRows(
+        world.db,
+        "service_role",
+        null,
+        `select id from public.subscription_payments where restaurant_id = $1 and provider_reference = '${paymentRef}'`,
+        [world.restaurantA],
+      );
+      expect(payments).toHaveLength(1);
+    });
+
+    it("a restaurant admin cannot record a payment for their own restaurant", async () => {
+      const failure = await expectSqlFailure(
+        world.db,
+        "authenticated",
+        world.adminA.id,
+        "select public.record_subscription_payment($1, $2, 'successful'::public.payment_status, 'sn-self-001', null, null, now(), null)",
+        [world.restaurantA, 100],
+      );
+      expectPermission(failure);
+    });
+
+    it("direct client INSERT into subscription_payments is denied", async () => {
+      const failure = await expectSqlFailure(
+        world.db,
+        "authenticated",
+        world.adminA.id,
+        "insert into public.subscription_payments (restaurant_id, restaurant_subscription_id, amount_tzs, status) values ($1, (select id from public.restaurant_subscriptions where restaurant_id = $1 limit 1), 100, 'successful')",
+        [world.restaurantA],
+      );
+      expect(
+        failure.code === "42501" || /permission denied/i.test(failure.message),
+        `expected a permission failure, got: ${failure.message}`,
+      ).toBe(true);
+    });
+
+    it("plan deactivation hides the plan from the active catalogue and blocks assignment, then reactivation restores it", async () => {
+      await runAs(
+        world.db,
+        "authenticated",
+        world.platformAdmin.id,
+        "select public.set_subscription_plan_active((select id from public.subscription_plans where code = 'qa_test_plan'), false)",
+      );
+      const visible = await queryRows<{ n: number }>(
+        world.db,
+        "authenticated",
+        world.adminA.id,
+        "select count(*)::int as n from public.subscription_plans where code = 'qa_test_plan' and is_active",
+      );
+      expect(visible[0]!.n).toBe(0);
+
+      const blocked = await expectSqlFailure(
+        world.db,
+        "authenticated",
+        world.platformAdmin.id,
+        "select public.assign_subscription_plan($1, (select id from public.subscription_plans where code = 'qa_test_plan'))",
+        [world.restaurantB],
+      );
+      expect(
+        blocked.code === "23503" || /missing or inactive/i.test(blocked.message),
+        `expected a missing-or-inactive failure, got: ${blocked.message}`,
+      ).toBe(true);
+
+      await runAs(
+        world.db,
+        "authenticated",
+        world.platformAdmin.id,
+        "select public.set_subscription_plan_active((select id from public.subscription_plans where code = 'qa_test_plan'), true)",
+      );
+      const restored = await queryRows<{ n: number }>(
+        world.db,
+        "authenticated",
+        world.adminA.id,
+        "select count(*)::int as n from public.subscription_plans where code = 'qa_test_plan' and is_active",
+      );
+      expect(restored[0]!.n).toBe(1);
+    });
+
+    it("expire_overdue_subscriptions expires only overdue rows and audits them", async () => {
+      await world.db.query(
+        "update public.restaurant_subscriptions set starts_on = current_date - interval '60 days', renews_on = current_date - interval '1 day' where restaurant_id = $1 and status = 'active'",
+        [world.restaurantA],
+      );
+
+      const expired = await queryRows<{ expire_overdue_subscriptions: number }>(
+        world.db,
+        "authenticated",
+        world.platformAdmin.id,
+        "select public.expire_overdue_subscriptions() as expire_overdue_subscriptions",
+      );
+      expect(expired[0]!.expire_overdue_subscriptions).toBeGreaterThanOrEqual(1);
+
+      const subscription = await queryRows<{ status: string }>(
+        world.db,
+        "service_role",
+        null,
+        "select status from public.restaurant_subscriptions where restaurant_id = $1 and status = 'expired'",
+        [world.restaurantA],
+      );
+      expect(subscription).toHaveLength(1);
+
+      const audit = await queryRows(
+        world.db,
+        "authenticated",
+        world.platformAdmin.id,
+        "select id from public.audit_logs where action = 'subscription.status.expired' and restaurant_id = $1",
+        [world.restaurantA],
+      );
+      expect(audit.length).toBeGreaterThanOrEqual(1);
+
+      // Restore a valid subscription for any subsequent work.
+      await runAs(
+        world.db,
+        "authenticated",
+        world.platformAdmin.id,
+        "select public.set_subscription_status($1, 'active'::public.subscription_status)",
+        [world.restaurantA],
+      );
+      const restored = await queryRows<{ status: string }>(
+        world.db,
+        "service_role",
+        null,
+        "select status from public.restaurant_subscriptions where restaurant_id = $1 and status = 'active'",
+        [world.restaurantA],
+      );
+      expect(restored).toHaveLength(1);
+    });
+
+    it("a restaurant admin cannot read another restaurant's audit logs", async () => {
+      const rows = await queryRows(
+        world.db,
+        "authenticated",
+        world.adminB.id,
+        "select id from public.audit_logs where restaurant_id = $1",
+        [world.restaurantA],
+      );
+      expect(rows).toHaveLength(0);
+    });
+
+    it("a restaurant admin cannot write the sync-level subscription_status directly", async () => {
+      const failure = await expectSqlFailure(
+        world.db,
+        "authenticated",
+        world.adminA.id,
+        "update public.restaurants set subscription_status = 'expired' where id = $1",
+        [world.restaurantA],
+      );
+      expect(
+        failure.code === "42501" || /permission denied/i.test(failure.message),
+        `expected a permission failure, got: ${failure.message}`,
       ).toBe(true);
     });
   });

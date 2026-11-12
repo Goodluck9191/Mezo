@@ -4,7 +4,7 @@ Multi-restaurant QR ordering SaaS for dine-in restaurants in Tanzania.
 
 **SMART DINING. SIMPLE SERVICE.**
 
-> **Status: Phase 4 — restaurant onboarding and workspace foundation complete and verified on staging; awaiting approval.** Sign-in, registration, email verification, password reset, profiles, applications, platform review, and the restaurant admin workspace (dashboard, onboarding, settings, staff invitations, logo management) all work end-to-end. Customer QR ordering is not yet live.
+> **Status: Phase 5 — subscription management complete and verified on staging; awaiting approval.** Sign-in, registration, applications, platform review, the restaurant admin workspace, and subscription management (catalogue, assignment, lifecycle, table-limit enforcement, payment records) all work end-to-end. Customer QR ordering is not yet live.
 
 ## Stack
 
@@ -78,10 +78,10 @@ src/
 │  ├─ (marketing)/        Public landing page and marketing layout
 │  ├─ (auth)/             Login, register, forgot/reset password, verify email, profile
 │  ├─ auth/confirm/       Email verification + invite token handler
-│  ├─ (restaurant-admin)/ Restaurant apply, dashboard, onboarding, settings (Phase 3–4)
+│  ├─ (restaurant-admin)/ Restaurant apply, dashboard, onboarding, settings (Phase 3–4), billing (Phase 5)
 │  ├─ (staff)/            Waiter and kitchen consoles (Phase 3); accept-invite (Phase 4)
-│  ├─ platform/           Platform-admin application review console (Phase 3)
-│  ├─ (customer)/         QR menu, cart, order tracking (Phase 5)
+│  ├─ platform/           Platform-admin area (applications; subscriptions + plans in Phase 5)
+│  ├─ (customer)/         QR menu, cart, order tracking (Phase 6)
 │  └─ api/
 │     └─ health/          Liveness endpoint
 │  └─ actions/            Server actions (auth, application review, profile, restaurant workspace)
@@ -89,7 +89,7 @@ src/
 │  ├─ ui/                 Reusable primitives (button, icons, input, select, textarea, skeleton)
 │  ├─ shared/             Header, footer, logo, theme toggle, ConfirmButton
 │  ├─ auth/               Sign-in/up forms, profile editor, verification page bits
-│  ├─ customer/           Customer feature components (Phase 5)
+│  ├─ customer/           Customer feature components (Phase 6)
 │  ├─ staff/              Staff feature components
 │  ├─ restaurant/         Restaurant workspace shell, profile & staff forms, empty states, skeletons
 │  └─ platform/           Platform administration components
@@ -97,9 +97,11 @@ src/
 │  ├─ env/                Typed, Zod-validated environment
 │  ├─ supabase/           Browser, server, admin, and proxy clients
 │  ├─ auth/               requireUser / membershipsWithRole / isPlatformAdmin / isRestaurantAdminOf guards
-│  ├─ validation/         Zod schemas (auth, roles, restaurant profile & staff)
+│  ├─ validation/         Zod schemas (auth, roles, restaurant profile & staff, subscriptions)
 │  ├─ security/           Role definitions and authorization helpers
 │  ├─ profile-completion.ts  Pure profile-completeness scoring
+│  ├─ subscription.ts     Server-only subscription data loaders (restaurant view, platform lists/detail)
+│  ├─ subscriptions-shared.ts  Client-safe subscription labels and formatting
 │  └─ restaurant.ts       Server-only workspace data + guard (restaurant queries, staff roster)
 ├─ types/                 Generated database types (see src/types/database.ts)
 └─ utils/                 Small shared utilities
@@ -115,14 +117,14 @@ tests/
 
 ## Database
 
-Phase 2 ships a multi-tenant PostgreSQL schema (21 tables, one public view, one storage bucket with RLS), deny-by-default client grants, and deny-by-default RLS. Authorization for tenant flows lives in Postgres; the proxy only refreshes sessions. Phase 3 adds server-side route guards in `src/lib/auth/guards.ts` — both the layouts and the server actions re-check before touching data. The proxy deliberately stays blind to roles. Phase 4 adds the `restaurant_staff_invitations` table and the `restaurant-logos` storage bucket (migration 14, fixed in 15).
+Phase 2 ships a multi-tenant PostgreSQL schema (21 tables, one public view, one storage bucket with RLS), deny-by-default client grants, and deny-by-default RLS. Authorization for tenant flows lives in Postgres; the proxy only refreshes sessions. Phase 3 adds server-side route guards in `src/lib/auth/guards.ts` — both the layouts and the server actions re-check before touching data. The proxy deliberately stays blind to roles. Phase 4 adds the `restaurant_staff_invitations` table and the `restaurant-logos` storage bucket (migration 14, fixed in 15). Phase 5 hardens table-limit enforcement (FOR UPDATE lock) and adds subscription lifecycle and payment-recording RPCs (migration 17).
 
 - **Tenant root:** `restaurants`, keyed by slug, reviewed by a platform admin before it goes live (`pending/approved/rejected`), with `active/suspended` operational state.
 - **QR tokens:** `restaurant_tables.qr_token` is 64 hex characters generated from two random UUIDs; it is a bearer secret, never sequential.
 - **Table sessions:** one open session per table, enforced by a partial unique index. Guests scan a QR code and join; staff approve and close. Multiple guests may share a pending/active session without individual approvals.
 - **Orders:** only while the table session is active; item snapshots are taken server-side at insert time; totals are recomputed from items, never from the current menu price.
 - **Payments:** stored separately from order status; schema-ready for Snippe integration, but no payment processing exists yet.
-- **Subscriptions:** platform-wide plans with `table_limit` snapshotted onto each restaurant; the table-limit trigger enforces it at insert time.
+- **Subscriptions:** platform-wide plans with `table_limit` snapshotted onto each restaurant; the table-limit trigger (with a FOR UPDATE row lock) enforces it at insert time. Subscription lifecycle transitions are enforced server-side in RPCs; restaurant admins cannot change plan, status, payment or limit through any client channel; platform-admin actions are audited in `audit_logs`. Payment recording is operator-attested in this phase (Snippe collection is not yet enabled).
 
 See `supabase/README.md` for how to apply migrations and `PROJECT_STATUS.md` for the exact migration list, policy inventory and test evidence.
 
@@ -184,8 +186,20 @@ Post-approval restaurant administrators get a workspace under `/restaurant/*`: a
 
 - **Multi-restaurant membership is supported**: a selector appears whenever the caller administers more than one restaurant, and every page/action scopes to the chosen membership.
 - **Staff invitation flow**: `invite_restaurant_staff()` RPC issues a single-use 64-hex token (stored as a hash); invitations expire after 7 days, are tied to one restaurant, are accepted only by the account whose email matches, and can be revoked by that restaurant's admins. No `restaurant_admin` role can ever be granted by invitation.
-- **No fabricated numbers**: orders/revenue/menu show labelled "Coming in Phase 5" empty states.
+- **No fabricated numbers**: orders/revenue/menu show labelled "Coming in a later phase" empty states.
+
+## Subscriptions (Phase 5)
+
+Subscription management is live on both the platform and restaurant sides:
+
+- **Catalogue** — plans are data, not code: `subscription_plans` (Starter/Growth/Business/Enterprise; all prices are development placeholders, 0 = custom arrangement). Only platform admins can create/edit/deactivate plans via RPCs; clients cannot write the catalogue at all.
+- **Assignment** — plan changes are made by the platform through `assign_subscription_plan()`: the current term is closed atomically and a new active term opens. Restaurants never self-assign; `table_limit` is re-snapshotted from the new plan; no table is ever deleted by a downgrade.
+- **Table-limit enforcement** — `enforce_table_limit()` takes a `FOR UPDATE` lock on the subscription row, so concurrent table creation cannot bypass the limit; lowering a plan never deletes existing tables; over-limit restaurants cannot add further tables.
+- **Lifecycle** — `pending → active | expired | cancelled; active → past_due | expired | cancelled; past_due → active | expired | cancelled; expired → active | cancelled`. `cancelled` is terminal. Restaurant admins never transition state; every transition and payment/audit action is logged in `audit_logs`.
+- **Billing boundary** — `subscription_payments` records payments (operator-attested in this phase; Snippe integration pending provider-capability verification). No recurring billing is enabled or claimed; payments are idempotent on provider reference.
+
+Restaurant admins see their plan, table usage, status and payment history at `/restaurant/billing` (read-only); the platform manages everything at `/platform/subscriptions` and `/platform/plans`.
 
 ## Next phase
 
-**Phase 5 — QR ordering, table sessions, waiter and kitchen flows.** Do not start until Phase 4 is explicitly approved. See `PROJECT_STATUS.md`.
+**Phase 6 — QR ordering, table sessions, waiter and kitchen flows.** Do not start until Phase 5 is explicitly approved. See `PROJECT_STATUS.md`.

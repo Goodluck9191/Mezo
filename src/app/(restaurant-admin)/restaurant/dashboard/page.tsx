@@ -25,6 +25,8 @@ import {
   summarizeStaff,
   toShellMemberships,
 } from "@/lib/restaurant";
+import { getRestaurantSubscriptionView } from "@/lib/subscription";
+import { statusLabel, usageLabel } from "@/lib/subscriptions-shared";
 import { computeProfileCompletion } from "@/lib/profile-completion";
 import { siteConfig } from "@/lib/site";
 import { cn } from "@/utils/cn";
@@ -44,12 +46,14 @@ export default async function RestaurantDashboardPage({
   const workspace = await requireWorkspace(searchParams, "/restaurant/dashboard");
   const { restaurant, memberships, user } = workspace;
 
-  const [staff, invitations] = await Promise.all([
+  const [staff, invitations, subscriptionView] = await Promise.all([
     getStaffForRestaurant(restaurant.id),
     getInvitationsForRestaurant(restaurant.id),
+    getRestaurantSubscriptionView(restaurant.id),
   ]);
   const staffSummary = summarizeStaff(staff);
   const pendingInvites = invitations.filter((invite) => invite.status === "pending").length;
+  const subscription = subscriptionView.subscription;
 
   const completion = computeProfileCompletion({
     name: restaurant.name,
@@ -110,10 +114,61 @@ export default async function RestaurantDashboardPage({
           ) : (
             <StatusBadge tone="amber">Not accepting orders yet</StatusBadge>
           )}
-          <StatusBadge tone="neutral">
-            Subscription: {restaurant.subscriptionStatus.replace(/_/g, " ")}
-          </StatusBadge>
+          {subscription ? (
+            <StatusBadge
+              tone={
+                subscription.status === "active"
+                  ? "green"
+                  : subscription.status === "past_due" || subscription.status === "expired"
+                    ? "amber"
+                    : "neutral"
+              }
+            >
+              Subscription: {statusLabel(subscription.status)}
+            </StatusBadge>
+          ) : (
+            <StatusBadge tone="neutral">Subscription: pending</StatusBadge>
+          )}
         </div>
+
+        {subscription ? (
+          <Link
+            href={`/restaurant/billing?restaurant=${encodeURIComponent(restaurant.slug)}`}
+            className={cn(
+              "group flex flex-wrap items-center justify-between gap-4 rounded-3xl border border-border bg-surface-strong p-4 shadow-sm transition-colors",
+              "hover:border-accent/40 hover:bg-accent/5 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent",
+            )}
+          >
+            <span className="flex items-center gap-3">
+              <span className="grid size-11 shrink-0 place-items-center rounded-2xl bg-accent/10 text-accent">
+                <WalletIcon className="size-5" />
+              </span>
+              <span>
+                <span className="block text-sm font-semibold text-foreground">
+                  {subscription.plan.name} — {statusLabel(subscription.status)}
+                </span>
+                <span className="mt-0.5 block text-xs leading-5 text-muted">
+                  {usageLabel(subscription.usedTables, subscription.tableLimit)}
+                  {subscription.renewsOn ? (
+                    <>
+                      {" "}
+                      · renews{" "}
+                      {new Date(subscription.renewsOn).toLocaleDateString("en-TZ", {
+                        day: "numeric",
+                        month: "short",
+                        year: "numeric",
+                      })}
+                    </>
+                  ) : null}
+                </span>
+              </span>
+            </span>
+            <span className="flex items-center gap-2 text-xs font-semibold text-muted transition-colors group-hover:text-accent">
+              Subscription & billing
+              <ArrowRightIcon className="size-4 transition-transform group-hover:translate-x-0.5" />
+            </span>
+          </Link>
+        ) : null}
 
         {!isApproved ? (
           <p
@@ -273,7 +328,7 @@ export default async function RestaurantDashboardPage({
           <div className="grid gap-3 sm:grid-cols-2">
             <EmptyState
               icon={<ClipboardListIcon className="size-5" />}
-              title="Orders — Coming in Phase 5"
+              title="Orders — Coming in Phase 6"
               description="Live orders from tables will appear here once customer ordering ships."
             />
             <EmptyState
@@ -288,7 +343,7 @@ export default async function RestaurantDashboardPage({
             />
             <EmptyState
               icon={<UsersIcon className="size-5" />}
-              title="Menu management — Coming in Phase 5"
+              title="Menu management — Coming in Phase 6"
               description="Categories and items will be managed here starting with the menu phase."
             />
           </div>

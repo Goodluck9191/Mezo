@@ -15,6 +15,7 @@ import {
   summarizeStaff,
   toShellMemberships,
 } from "@/lib/restaurant";
+import { getRestaurantSubscriptionView } from "@/lib/subscription";
 import { computeProfileCompletion } from "@/lib/profile-completion";
 import { siteConfig } from "@/lib/site";
 import { cn } from "@/utils/cn";
@@ -36,6 +37,7 @@ export default async function RestaurantOnboardingPage({
 
   const staff = await getStaffForRestaurant(restaurant.id);
   const staffSummary = summarizeStaff(staff);
+  const { subscription } = await getRestaurantSubscriptionView(restaurant.id);
 
   const completion = computeProfileCompletion({
     name: restaurant.name,
@@ -86,15 +88,18 @@ export default async function RestaurantOnboardingPage({
     },
     {
       label: "Menu, tables and QR codes",
-      detail: "Planned for Phase 5 — customer ordering ships there.",
+      detail: "Planned for Phase 6 — customer ordering ships there.",
       done: false,
-      locked: "Phase 5",
+      locked: "Phase 6",
     },
     {
       label: "Subscription and billing",
-      detail: "Subscription enforcement and billing arrive with a later phase.",
-      done: false,
-      locked: "Later phase",
+      detail:
+        subscription?.status === "active"
+          ? "On an active plan — usage and renewal dates live on the billing page."
+          : "Your subscription is pending. The platform activates it on approval.",
+      done: subscription?.status === "active",
+      href: `/restaurant/billing?restaurant=${encodeURIComponent(restaurant.slug)}`,
     },
   ];
 
