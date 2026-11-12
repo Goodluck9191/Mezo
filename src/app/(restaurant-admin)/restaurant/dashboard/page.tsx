@@ -1,11 +1,31 @@
 import type { Metadata } from "next";
 import Link from "next/link";
-import { redirect } from "next/navigation";
 
-import { Logo } from "@/components/shared/logo";
+import {
+  ArrowRightIcon,
+  ClipboardListIcon,
+  QrCodeIcon,
+  UsersIcon,
+  UtensilsIcon,
+  WalletIcon,
+} from "@/components/ui/icons";
 import { buttonVariants } from "@/components/ui/button";
-import { membershipsWithRole, requireUser } from "@/lib/auth/guards";
-import { ROLE_LABELS } from "@/lib/security/roles";
+import { EmptyState } from "@/components/restaurant/empty-state";
+import {
+  Panel,
+  QuickActionLink,
+  StatusBadge,
+  WorkspaceHeading,
+  WorkspaceShell,
+} from "@/components/restaurant/workspace-shell";
+import {
+  requireWorkspace,
+  getInvitationsForRestaurant,
+  getStaffForRestaurant,
+  summarizeStaff,
+  toShellMemberships,
+} from "@/lib/restaurant";
+import { computeProfileCompletion } from "@/lib/profile-completion";
 import { siteConfig } from "@/lib/site";
 import { cn } from "@/utils/cn";
 
@@ -13,76 +33,267 @@ export const dynamic = "force-dynamic";
 
 export const metadata: Metadata = {
   title: "Restaurant dashboard",
-  description: `Manage your restaurants on ${siteConfig.name}.`,
+  description: `Manage your restaurant on ${siteConfig.name}.`,
 };
 
-export default async function RestaurantDashboardPage() {
-  const user = await requireUser("/restaurant/dashboard");
-  const memberships = await membershipsWithRole(user.id, ["restaurant_admin"]);
+export default async function RestaurantDashboardPage({
+  searchParams,
+}: {
+  searchParams: Promise<{ restaurant?: string }>;
+}) {
+  const workspace = await requireWorkspace(searchParams, "/restaurant/dashboard");
+  const { restaurant, memberships, user } = workspace;
 
-  if (memberships.length === 0) {
-    const [waiter, kitchen] = await Promise.all([
-      membershipsWithRole(user.id, ["waiter"]),
-      membershipsWithRole(user.id, ["kitchen"]),
-    ]);
-    redirect(waiter.length > 0 ? "/waiter" : kitchen.length > 0 ? "/kitchen" : "/restaurant/apply");
-  }
+  const [staff, invitations] = await Promise.all([
+    getStaffForRestaurant(restaurant.id),
+    getInvitationsForRestaurant(restaurant.id),
+  ]);
+  const staffSummary = summarizeStaff(staff);
+  const pendingInvites = invitations.filter((invite) => invite.status === "pending").length;
+
+  const completion = computeProfileCompletion({
+    name: restaurant.name,
+    description: restaurant.description,
+    logoUrl: restaurant.logoUrl,
+    contactEmail: restaurant.contactEmail,
+    contactPhone: restaurant.contactPhone,
+    addressLine1: restaurant.addressLine1,
+    addressLine2: restaurant.addressLine2,
+    city: restaurant.city,
+    region: restaurant.region,
+    countryCode: restaurant.countryCode,
+  });
+
+  const isApproved = restaurant.applicationStatus === "approved";
+  const isActive = restaurant.operationalStatus === "active";
+  const profileComplete = completion.percent === 100;
 
   return (
-    <main id="main" className="mx-auto w-full max-w-3xl px-4 py-10 sm:px-6 sm:py-14 lg:py-20">
-      <div className="flex items-center gap-3">
-        <Logo />
-        <p className="text-xs font-semibold uppercase tracking-[0.18em] text-muted">
-          Restaurant dashboard
-        </p>
-      </div>
+    <WorkspaceShell
+      userEmail={user.email}
+      restaurant={{
+        restaurantId: restaurant.id,
+        slug: restaurant.slug,
+        name: restaurant.name,
+        role: workspace.membership.role,
+      }}
+      memberships={toShellMemberships(memberships)}
+      active="dashboard"
+    >
+      <div className="mx-auto max-w-6xl space-y-6">
+        <WorkspaceHeading
+          eyebrow="Restaurant workspace"
+          title={restaurant.name}
+          description="Your restaurant at a glance: approval state, profile readiness, and the people who work here."
+          icon={
+            restaurant.logoUrl ? (
+              <span className="block size-full overflow-hidden rounded-2xl">
+                {/* eslint-disable-next-line @next/next/no-img-element */}
+                <img src={restaurant.logoUrl} alt="" className="size-full object-cover" />
+              </span>
+            ) : (
+              <UtensilsIcon />
+            )
+          }
+        />
 
-      <h1 className="mt-4 text-2xl font-semibold tracking-tight sm:text-3xl">Your restaurants</h1>
-      <p className="mt-2 text-sm leading-6 text-muted">
-        You administer{" "}
-        {memberships.length === 1 ? "one restaurant" : `${memberships.length} restaurants`}. The
-        full dashboard arrives in later phases; for now you can review your restaurants.
-      </p>
+        <div className="flex flex-wrap items-center gap-2">
+          {isApproved ? (
+            <StatusBadge tone="green">Approved</StatusBadge>
+          ) : restaurant.applicationStatus === "pending" ? (
+            <StatusBadge tone="amber">Awaiting review</StatusBadge>
+          ) : (
+            <StatusBadge tone="neutral">Application {restaurant.applicationStatus}</StatusBadge>
+          )}
+          {isActive ? (
+            <StatusBadge tone="green">Open for business</StatusBadge>
+          ) : (
+            <StatusBadge tone="amber">Not accepting orders yet</StatusBadge>
+          )}
+          <StatusBadge tone="neutral">
+            Subscription: {restaurant.subscriptionStatus.replace(/_/g, " ")}
+          </StatusBadge>
+        </div>
 
-      <ul className="mt-6 grid gap-4">
-        {memberships.map((membership) => {
-          return (
-            <li
-              key={membership.restaurantId}
-              className="rounded-3xl border border-border bg-surface-strong p-6 shadow-sm sm:p-8"
-            >
-              <div className="flex flex-wrap items-start justify-between gap-4">
-                <div>
-                  <p className="text-lg font-semibold">{membership.restaurant.name}</p>
-                  <p className="text-xs text-muted">/{membership.restaurant.slug}</p>
-                </div>
-                <span className="inline-flex items-center rounded-full bg-accent/10 px-3 py-1 text-xs font-medium text-accent">
-                  {ROLE_LABELS[membership.role]}
+        {!isApproved ? (
+          <p
+            role="status"
+            className="rounded-2xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm leading-6 text-amber-900 dark:border-amber-500/20 dark:bg-amber-500/10 dark:text-amber-200"
+          >
+            Your application is with the Mezo team. You can already prepare the profile below;
+            approval unlocks your public presence.
+          </p>
+        ) : null}
+
+        <div className="grid gap-5 xl:grid-cols-3">
+          {/* Profile completion */}
+          <Panel
+            className="xl:col-span-2"
+            title="Profile completion"
+            description="A complete profile helps the Mezo team approve you faster and gives customers the details they need."
+            actions={
+              <Link
+                href={`/restaurant/settings/profile?restaurant=${encodeURIComponent(restaurant.slug)}`}
+                className={cn(buttonVariants({ variant: "secondary", size: "sm" }))}
+              >
+                Edit profile
+                <ArrowRightIcon className="size-4" />
+              </Link>
+            }
+          >
+            <div className="flex flex-wrap items-center gap-6">
+              <div
+                role="progressbar"
+                aria-valuenow={completion.percent}
+                aria-valuemin={0}
+                aria-valuemax={100}
+                aria-label="Profile completeness"
+                className="grid size-20 shrink-0 place-items-center rounded-3xl bg-accent/10"
+              >
+                <span className="text-xl font-semibold tabular-nums text-accent">
+                  {completion.percent}%
                 </span>
               </div>
-              <dl className="mt-4 grid gap-4 text-sm sm:grid-cols-2">
-                <div>
-                  <dt className="text-muted">Application</dt>
-                  <dd className="mt-1 font-medium">{membership.restaurant.applicationStatus}</dd>
+              <div className="min-w-0 flex-1">
+                <div className="h-2.5 w-full overflow-hidden rounded-full bg-surface">
+                  <div
+                    className="h-full rounded-full bg-accent transition-[width] duration-500"
+                    style={{ width: `${completion.percent}%` }}
+                  />
                 </div>
-                <div>
-                  <dt className="text-muted">Operations</dt>
-                  <dd className="mt-1 font-medium">{membership.restaurant.operationalStatus}</dd>
-                </div>
-              </dl>
-              <div className="mt-5 border-t border-border pt-5 text-sm text-muted">
-                Menu, tables, staff, orders and subscription controls land in Phases 4–5.
+                <p className="mt-2 text-xs text-muted">
+                  {completion.completed} of {completion.total} details provided.
+                </p>
+                {profileComplete ? (
+                  <p className="mt-2 text-sm font-medium text-accent">
+                    Profile complete — nice work.
+                  </p>
+                ) : (
+                  <ul className="mt-2 flex flex-wrap gap-2">
+                    {completion.missing.slice(0, 4).map((item) => (
+                      <li
+                        key={item.key}
+                        className="rounded-full bg-surface px-3 py-1 text-[11px] font-medium text-muted"
+                      >
+                        Missing: {item.label}
+                      </li>
+                    ))}
+                    {completion.missing.length > 4 ? (
+                      <li className="rounded-full bg-surface px-3 py-1 text-[11px] font-medium text-muted">
+                        +{completion.missing.length - 4} more
+                      </li>
+                    ) : null}
+                  </ul>
+                )}
               </div>
-            </li>
-          );
-        })}
-      </ul>
+            </div>
+          </Panel>
 
-      <div className="mt-8">
-        <Link href="/profile" className={cn(buttonVariants({ variant: "secondary" }))}>
-          View your profile
-        </Link>
+          {/* Staff overview */}
+          <Panel
+            title="Staff"
+            description="Who works at this restaurant today."
+            actions={
+              <Link
+                href={`/restaurant/settings/staff?restaurant=${encodeURIComponent(restaurant.slug)}`}
+                className={cn(buttonVariants({ variant: "secondary", size: "sm" }))}
+              >
+                Manage
+              </Link>
+            }
+          >
+            <dl className="grid grid-cols-2 gap-4 text-sm">
+              <div className="rounded-2xl bg-surface p-3">
+                <dt className="text-xs text-muted">Active members</dt>
+                <dd className="mt-1 text-2xl font-semibold tabular-nums text-foreground">
+                  {staffSummary.active}
+                </dd>
+              </div>
+              <div className="rounded-2xl bg-surface p-3">
+                <dt className="text-xs text-muted">Pending invites</dt>
+                <dd className="mt-1 text-2xl font-semibold tabular-nums text-foreground">
+                  {pendingInvites}
+                </dd>
+              </div>
+              <div className="rounded-2xl bg-surface p-3">
+                <dt className="text-xs text-muted">Waiting staff</dt>
+                <dd className="mt-1 font-semibold tabular-nums text-foreground">
+                  {staffSummary.waiters}
+                </dd>
+              </div>
+              <div className="rounded-2xl bg-surface p-3">
+                <dt className="text-xs text-muted">Kitchen</dt>
+                <dd className="mt-1 font-semibold tabular-nums text-foreground">
+                  {staffSummary.kitchen}
+                </dd>
+              </div>
+            </dl>
+            {staffSummary.active <= 1 ? (
+              <p className="mt-3 text-xs leading-5 text-muted">
+                You are the only active member. Invite your team from{" "}
+                <Link
+                  href={`/restaurant/settings/staff?restaurant=${encodeURIComponent(restaurant.slug)}`}
+                  className="font-medium text-accent hover:underline"
+                >
+                  Staff settings
+                </Link>
+                .
+              </p>
+            ) : null}
+          </Panel>
+        </div>
+
+        {/* Quick actions */}
+        <section aria-label="Quick actions" className="grid gap-3 sm:grid-cols-3">
+          <QuickActionLink
+            href={`/restaurant/settings/profile?restaurant=${encodeURIComponent(restaurant.slug)}`}
+            title="Edit restaurant profile"
+            description="Name, logo, contact details and address."
+            icon={<ClipboardListIcon className="size-5" />}
+          />
+          <QuickActionLink
+            href={`/restaurant/onboarding?restaurant=${encodeURIComponent(restaurant.slug)}`}
+            title="Onboarding checklist"
+            description="Track approval and what to finish next."
+            icon={<QrCodeIcon className="size-5" />}
+          />
+          <QuickActionLink
+            href={`/restaurant/settings/staff?restaurant=${encodeURIComponent(restaurant.slug)}`}
+            title="Invite your team"
+            description="Add waiters and kitchen staff to this restaurant."
+            icon={<UsersIcon className="size-5" />}
+          />
+        </section>
+
+        {/* Honest empty states */}
+        <Panel
+          title="Coming in later phases"
+          description="Not built yet — no data is fabricated here."
+        >
+          <div className="grid gap-3 sm:grid-cols-2">
+            <EmptyState
+              icon={<ClipboardListIcon className="size-5" />}
+              title="Orders — Coming in Phase 5"
+              description="Live orders from tables will appear here once customer ordering ships."
+            />
+            <EmptyState
+              icon={<QrCodeIcon className="size-5" />}
+              title="QR codes — Coming in a later phase"
+              description="Printable per-table QR codes arrive with the customer ordering phase."
+            />
+            <EmptyState
+              icon={<WalletIcon className="size-5" />}
+              title="Revenue — Coming in a later phase"
+              description="Payments and payouts are handled by a later billing phase; no figures exist yet."
+            />
+            <EmptyState
+              icon={<UsersIcon className="size-5" />}
+              title="Menu management — Coming in Phase 5"
+              description="Categories and items will be managed here starting with the menu phase."
+            />
+          </div>
+        </Panel>
       </div>
-    </main>
+    </WorkspaceShell>
   );
 }

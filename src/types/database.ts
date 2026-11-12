@@ -855,6 +855,81 @@ export type Database = {
           },
         ];
       };
+      restaurant_staff_invitations: {
+        Row: {
+          accepted_at: string | null;
+          accepted_user_id: string | null;
+          created_at: string;
+          email: string;
+          expires_at: string;
+          id: string;
+          invited_by: string | null;
+          restaurant_id: string;
+          role: Database["public"]["Enums"]["restaurant_role"];
+          status: Database["public"]["Enums"]["staff_invitation_status"];
+          token_hash: string;
+          updated_at: string;
+        };
+        ComputedFields: never;
+        Insert: {
+          accepted_at?: string | null;
+          accepted_user_id?: string | null;
+          created_at?: string;
+          email: string;
+          expires_at?: string;
+          id?: string;
+          invited_by?: string | null;
+          restaurant_id: string;
+          role: Database["public"]["Enums"]["restaurant_role"];
+          status?: Database["public"]["Enums"]["staff_invitation_status"];
+          token_hash: string;
+          updated_at?: string;
+        };
+        Update: {
+          accepted_at?: string | null;
+          accepted_user_id?: string | null;
+          created_at?: string;
+          email?: string;
+          expires_at?: string;
+          id?: string;
+          invited_by?: string | null;
+          restaurant_id?: string;
+          role?: Database["public"]["Enums"]["restaurant_role"];
+          status?: Database["public"]["Enums"]["staff_invitation_status"];
+          token_hash?: string;
+          updated_at?: string;
+        };
+        Relationships: [
+          {
+            foreignKeyName: "restaurant_staff_invitations_accepted_user_id_fkey";
+            columns: ["accepted_user_id"];
+            isOneToOne: false;
+            referencedRelation: "profiles";
+            referencedColumns: ["id"];
+          },
+          {
+            foreignKeyName: "restaurant_staff_invitations_invited_by_fkey";
+            columns: ["invited_by"];
+            isOneToOne: false;
+            referencedRelation: "profiles";
+            referencedColumns: ["id"];
+          },
+          {
+            foreignKeyName: "restaurant_staff_invitations_restaurant_id_fkey";
+            columns: ["restaurant_id"];
+            isOneToOne: false;
+            referencedRelation: "public_restaurants";
+            referencedColumns: ["id"];
+          },
+          {
+            foreignKeyName: "restaurant_staff_invitations_restaurant_id_fkey";
+            columns: ["restaurant_id"];
+            isOneToOne: false;
+            referencedRelation: "restaurants";
+            referencedColumns: ["id"];
+          },
+        ];
+      };
       restaurant_subscriptions: {
         Row: {
           cancelled_at: string | null;
@@ -1375,6 +1450,15 @@ export type Database = {
       };
     };
     Functions: {
+      accept_restaurant_invitation: {
+        Args: { p_token: string };
+        Returns: {
+          restaurant_id: string;
+          restaurant_name: string;
+          restaurant_slug: string;
+          role: Database["public"]["Enums"]["restaurant_role"];
+        }[];
+      };
       apply_for_restaurant: {
         Args: {
           p_address_line1?: string;
@@ -1457,6 +1541,25 @@ export type Database = {
           isSetofReturn: false;
         };
       };
+      deactivate_restaurant_member: {
+        Args: { p_member_id: string };
+        Returns: {
+          created_at: string;
+          id: string;
+          invited_by: string | null;
+          is_active: boolean;
+          restaurant_id: string;
+          role: Database["public"]["Enums"]["restaurant_role"];
+          updated_at: string;
+          user_id: string;
+        };
+        SetofOptions: {
+          from: "*";
+          to: "restaurant_members";
+          isOneToOne: true;
+          isSetofReturn: false;
+        };
+      };
       guest_can_order: {
         Args: { p_guest_session_id: string; p_restaurant_id: string; p_table_session_id: string };
         Returns: boolean;
@@ -1472,6 +1575,22 @@ export type Database = {
           p_roles: Database["public"]["Enums"]["restaurant_role"][];
         };
         Returns: boolean;
+      };
+      invite_restaurant_staff: {
+        Args: {
+          p_email: string;
+          p_restaurant_id: string;
+          p_role: Database["public"]["Enums"]["restaurant_role"];
+        };
+        Returns: {
+          email: string;
+          expires_at: string;
+          id: string;
+          restaurant_id: string;
+          role: Database["public"]["Enums"]["restaurant_role"];
+          status: Database["public"]["Enums"]["staff_invitation_status"];
+          token: string;
+        }[];
       };
       is_category_public: { Args: { p_category_id: string }; Returns: boolean };
       is_platform_admin: { Args: Record<PropertyKey, never>; Returns: boolean };
@@ -1529,6 +1648,29 @@ export type Database = {
           isSetofReturn: false;
         };
       };
+      revoke_restaurant_invitation: {
+        Args: { p_invitation_id: string };
+        Returns: {
+          accepted_at: string | null;
+          accepted_user_id: string | null;
+          created_at: string;
+          email: string;
+          expires_at: string;
+          id: string;
+          invited_by: string | null;
+          restaurant_id: string;
+          role: Database["public"]["Enums"]["restaurant_role"];
+          status: Database["public"]["Enums"]["staff_invitation_status"];
+          token_hash: string;
+          updated_at: string;
+        };
+        SetofOptions: {
+          from: "*";
+          to: "restaurant_staff_invitations";
+          isOneToOne: true;
+          isSetofReturn: false;
+        };
+      };
       shares_restaurant_with: { Args: { p_user_id: string }; Returns: boolean };
     };
     Enums: {
@@ -1542,6 +1684,7 @@ export type Database = {
       payment_status: "pending" | "processing" | "successful" | "failed" | "cancelled" | "refunded";
       payment_webhook_status: "received" | "processed" | "failed" | "ignored";
       restaurant_role: "restaurant_admin" | "waiter" | "kitchen";
+      staff_invitation_status: "pending" | "accepted" | "revoked" | "expired";
       subscription_status: "pending" | "active" | "past_due" | "cancelled" | "expired";
       table_session_status: "pending" | "active" | "closed";
       waiter_request_status: "open" | "acknowledged" | "resolved" | "cancelled";
@@ -1670,6 +1813,7 @@ export const Constants = {
       payment_status: ["pending", "processing", "successful", "failed", "cancelled", "refunded"],
       payment_webhook_status: ["received", "processed", "failed", "ignored"],
       restaurant_role: ["restaurant_admin", "waiter", "kitchen"],
+      staff_invitation_status: ["pending", "accepted", "revoked", "expired"],
       subscription_status: ["pending", "active", "past_due", "cancelled", "expired"],
       table_session_status: ["pending", "active", "closed"],
       waiter_request_status: ["open", "acknowledged", "resolved", "cancelled"],

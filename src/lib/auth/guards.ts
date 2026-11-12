@@ -117,10 +117,6 @@ export async function membershipsWithRole(
 
 /**
  * Server guard: at least one active membership holding one of `roles`.
- * Redirects to `fallback` (default `/`) when the user has none.
- */
-/**
- * Server guard: at least one active membership holding one of `roles`.
  * Redirects to `fallback` (default '/') when the user has none.
  */
 export async function requireRestaurantRole(
@@ -164,6 +160,59 @@ export async function isPlatformAdmin(): Promise<boolean> {
     .from("platform_admins")
     .select("user_id")
     .eq("user_id", user.id)
+    .maybeSingle();
+
+  return !error && data !== null;
+}
+
+// --- Restaurant workspace helpers -------------------------------------------
+
+/**
+ * Returns the current user's full restaurant membership list with fields
+ * needed by the workspace shell: role, restaurant id, name, slug,
+ * status, applicationStatus.
+ */
+export async function getAdministeredRestaurants(userId: string): Promise<Membership[]> {
+  return membershipsWithRole(userId, ["restaurant_admin"]);
+}
+
+/**
+ * Find the active restaurant in the user's memberships by slug. Returns the
+ * slug verbatim (with any URL-embedded slug) if found.
+ */
+export function pickActiveRestaurant(
+  memberships: readonly Membership[],
+  slug: string | null | undefined,
+): Membership | undefined {
+  if (slug) {
+    return memberships.find((m) => m.restaurant.slug === slug);
+  }
+  // When no slug is supplied, follow a deterministic order: most recently
+  // opened restaurant first? We don't store that, so take the first one with
+  // the most recent member invite, then fallback to first encountered.
+  return memberships[0];
+}
+
+/** Build the canonical query string for menu/settings pages in this context. */
+export function withRestaurantQuery(basePath: string, slug: string | undefined): string {
+  const query = slug ? `?restaurant=${encodeURIComponent(slug)}` : "";
+  return `${basePath}${query}`;
+}
+
+/**
+ * True when `userId` is an active restaurant_admin of `restaurantId`.
+ * Server actions must call this before mutating anything scoped to the
+ * restaurant — a restaurant_id submitted by the browser is never enough.
+ */
+export async function isRestaurantAdminOf(userId: string, restaurantId: string): Promise<boolean> {
+  const supabase = await createClient();
+  const { data, error } = await supabase
+    .from("restaurant_members")
+    .select("id")
+    .eq("user_id", userId)
+    .eq("restaurant_id", restaurantId)
+    .eq("role", "restaurant_admin")
+    .eq("is_active", true)
     .maybeSingle();
 
   return !error && data !== null;

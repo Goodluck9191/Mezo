@@ -4,7 +4,7 @@ Multi-restaurant QR ordering SaaS for dine-in restaurants in Tanzania.
 
 **SMART DINING. SIMPLE SERVICE.**
 
-> **Status: Phase 3 — authentication and authorization in place.** Sign-in, registration, email verification, password reset, profile management, restaurant application, role-based staff consoles and a platform-admin review console are working end-to-end. The customer QR ordering UI is not yet live.
+> **Status: Phase 4 — restaurant onboarding and workspace foundation complete and verified on staging; awaiting approval.** Sign-in, registration, email verification, password reset, profiles, applications, platform review, and the restaurant admin workspace (dashboard, onboarding, settings, staff invitations, logo management) all work end-to-end. Customer QR ordering is not yet live.
 
 ## Stack
 
@@ -78,33 +78,34 @@ src/
 │  ├─ (marketing)/        Public landing page and marketing layout
 │  ├─ (auth)/             Login, register, forgot/reset password, verify email, profile
 │  ├─ auth/confirm/       Email verification + invite token handler
-│  ├─ (restaurant-admin)/ Restaurant apply and dashboard (Phase 3)
-│  ├─ (staff)/            Waiter and kitchen consoles (Phase 3)
+│  ├─ (restaurant-admin)/ Restaurant apply, dashboard, onboarding, settings (Phase 3–4)
+│  ├─ (staff)/            Waiter and kitchen consoles (Phase 3); accept-invite (Phase 4)
 │  ├─ platform/           Platform-admin application review console (Phase 3)
 │  ├─ (customer)/         QR menu, cart, order tracking (Phase 5)
 │  └─ api/
 │     └─ health/          Liveness endpoint
-│  └─ actions/            Server actions (auth, application review, profile)
+│  └─ actions/            Server actions (auth, application review, profile, restaurant workspace)
 ├─ components/
-│  ├─ ui/                 Reusable primitives (button, icons, input, select, textarea)
-│  ├─ shared/             Header, footer, logo, theme toggle
+│  ├─ ui/                 Reusable primitives (button, icons, input, select, textarea, skeleton)
+│  ├─ shared/             Header, footer, logo, theme toggle, ConfirmButton
 │  ├─ auth/               Sign-in/up forms, profile editor, verification page bits
 │  ├─ customer/           Customer feature components (Phase 5)
 │  ├─ staff/              Staff feature components
-│  ├─ restaurant/         Restaurant administration components
+│  ├─ restaurant/         Restaurant workspace shell, profile & staff forms, empty states, skeletons
 │  └─ platform/           Platform administration components
 ├─ lib/
 │  ├─ env/                Typed, Zod-validated environment
 │  ├─ supabase/           Browser, server, admin, and proxy clients
-│  ├─ auth/               requireUser / membershipsWithRole / isPlatformAdmin guards
-│  ├─ validation/         Zod schemas (forms, auth, registration, profile)
-│  └─ security/           Role definitions and authorization helpers
-├─ services/              Domain services (Phase 2+)
+│  ├─ auth/               requireUser / membershipsWithRole / isPlatformAdmin / isRestaurantAdminOf guards
+│  ├─ validation/         Zod schemas (auth, roles, restaurant profile & staff)
+│  ├─ security/           Role definitions and authorization helpers
+│  ├─ profile-completion.ts  Pure profile-completeness scoring
+│  └─ restaurant.ts       Server-only workspace data + guard (restaurant queries, staff roster)
 ├─ types/                 Generated database types (see src/types/database.ts)
 └─ utils/                 Small shared utilities
 supabase/
 ├─ config.toml            Local Supabase CLI configuration
-├─ migrations/            Ordered SQL migrations (090000–110000)
+├─ migrations/            Ordered SQL migrations (090000–140000)
 ├─ seed.sql               Development subscription plans (no accounts)
 └─ README.md              Database workflow and role notes
 tests/
@@ -114,7 +115,7 @@ tests/
 
 ## Database
 
-Phase 2 ships a multi-tenant PostgreSQL schema (21 tables plus one public view), deny-by-default client grants, and deny-by-default RLS. Authorization for tenant flows lives in Postgres; the proxy only refreshes sessions. Phase 3 adds server-side route guards in `src/lib/auth/guards.ts` — both the layouts and the server actions re-check before touching data. The proxy deliberately stays blind to roles.
+Phase 2 ships a multi-tenant PostgreSQL schema (21 tables, one public view, one storage bucket with RLS), deny-by-default client grants, and deny-by-default RLS. Authorization for tenant flows lives in Postgres; the proxy only refreshes sessions. Phase 3 adds server-side route guards in `src/lib/auth/guards.ts` — both the layouts and the server actions re-check before touching data. The proxy deliberately stays blind to roles. Phase 4 adds the `restaurant_staff_invitations` table and the `restaurant-logos` storage bucket (migration 14, fixed in 15).
 
 - **Tenant root:** `restaurants`, keyed by slug, reviewed by a platform admin before it goes live (`pending/approved/rejected`), with `active/suspended` operational state.
 - **QR tokens:** `restaurant_tables.qr_token` is 64 hex characters generated from two random UUIDs; it is a bearer secret, never sequential.
@@ -142,12 +143,15 @@ Defined once in `src/lib/security/roles.ts` and validated with Zod in `src/lib/v
 
 Server-side guards in `src/lib/auth/guards.ts` implement the checks below. None of them trust client-supplied IDs, tokens, or roles.
 
-| Entry point                          | Allows                                                                                   |
-| ------------------------------------ | ---------------------------------------------------------------------------------------- |
-| `getUser()` / `requireUser(next?)`   | Any authenticated session; redirects to `/login?next=…` otherwise.                       |
-| `membershipsWithRole(userId, roles)` | User's memberships scoped to the requested roles. Used by waiter/kitchen/admin consoles. |
-| `requirePlatformAdmin(fallback?)`    | `platform_admins` table check; non-platform users are sent away.                         |
-| `isPlatformAdmin()`                  | Boolean platform-admin predicate (server actions, e.g. application review).              |
+| Entry point                          | Allows                                                                                             |
+| ------------------------------------ | -------------------------------------------------------------------------------------------------- |
+| `getUser()` / `requireUser(next?)`   | Any authenticated session; redirects to `/login?next=…` otherwise.                                 |
+| `membershipsWithRole(userId, roles)` | User's memberships scoped to the requested roles. Used by waiter/kitchen/admin consoles.           |
+| `requirePlatformAdmin(fallback?)`    | `platform_admins` table check; non-platform users are sent away.                                   |
+| `isPlatformAdmin()`                  | Boolean platform-admin predicate (server actions, e.g. application review).                        |
+| `isRestaurantAdminOf(userId, id)`    | True only for an active `restaurant_admin` of that restaurant; used by every Phase 4 write action. |
+
+Restaurant workspace pages resolve the active restaurant from the caller's memberships via `requireWorkspace()` in `src/lib/restaurant.ts`; a `?restaurant=<slug>` the caller does not administer renders 404. No server action trusts a restaurant id submitted by the browser — membership is always re-verified server-side, and Postgres (RLS + privileges + triggers) is the final arbiter.
 
 The `/auth/confirm` route verifies the email confirmation/invitation/reset `token_hash` with `verifyOtp()` and redirects by token `type`. The `/login`, `/register` and `/forgot-password` pages redirect already-authenticated users to their dashboard. The proxy refreshes the session cookie only; no authorization decisions happen there.
 
@@ -174,6 +178,14 @@ curl http://localhost:3000/api/health
 }
 ```
 
+## Restaurant workspace (Phases 3–4)
+
+Post-approval restaurant administrators get a workspace under `/restaurant/*`: a responsive dashboard (profile completion, approval/operational/subscription status, staff overview, quick actions, clearly labelled empty states for not-yet-built features), an onboarding checklist, settings (read-only platform-controlled fields plus owner-editable profile with logo upload via a short-lived signed URL), and staff management (single-use, hash-stored invitations for waiters and kitchen staff — never emailed in this environment; the one-time link is copied to the invitee out of band).
+
+- **Multi-restaurant membership is supported**: a selector appears whenever the caller administers more than one restaurant, and every page/action scopes to the chosen membership.
+- **Staff invitation flow**: `invite_restaurant_staff()` RPC issues a single-use 64-hex token (stored as a hash); invitations expire after 7 days, are tied to one restaurant, are accepted only by the account whose email matches, and can be revoked by that restaurant's admins. No `restaurant_admin` role can ever be granted by invitation.
+- **No fabricated numbers**: orders/revenue/menu show labelled "Coming in Phase 5" empty states.
+
 ## Next phase
 
-**Phase 4 — QR ordering, table sessions, and real-time kitchen/waiter flow.** Do not start until approved. See `PROJECT_STATUS.md`.
+**Phase 5 — QR ordering, table sessions, waiter and kitchen flows.** Do not start until Phase 4 is explicitly approved. See `PROJECT_STATUS.md`.

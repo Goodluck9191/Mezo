@@ -70,7 +70,7 @@ async function insertRestaurant(
   );
 }
 
-const FIXTURE_SLUGS = ["demo-cafe", "other-bistro", "tiny-diner"];
+const FIXTURE_SLUGS = ["demo-cafe", "other-bistro", "tiny-diner", "scratch-phase4"];
 const STAFF_APPLICATION_SLUGS = ["coastal-grill", "reject-grill"];
 
 /**

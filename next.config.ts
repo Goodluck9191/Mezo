@@ -14,6 +14,12 @@ const securityHeaders = [
   },
 ];
 
+const acceptInviteHeaders = [
+  // Invitation tokens travel in the URL; this route must never leak a
+  // referrer anywhere — not even the origin.
+  { key: "Referrer-Policy", value: "no-referrer" },
+];
+
 const nextConfig: NextConfig = {
   poweredByHeader: false,
   reactStrictMode: true,
@@ -30,6 +36,12 @@ const nextConfig: NextConfig = {
       {
         source: "/:path*",
         headers: securityHeaders,
+      },
+      // Last match wins for the same key — the invitation route gets
+      // Referrer-Policy: no-referrer instead of the site default.
+      {
+        source: "/accept-invite",
+        headers: acceptInviteHeaders,
       },
     ];
   },

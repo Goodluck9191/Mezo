@@ -52,15 +52,19 @@ authenticated clients, never by reading the policy definitions alone.
 Phase 2 was also verified against the dedicated **mezo-staging** Supabase
 project (`sskooncjmymzoxlhkulh`, PostgreSQL 17.11, `eu-central-1`).
 
-- Migrations were applied with `supabase db push --remote --include-seed` and
-  inspected with `supabase migration list --remote` (13 applied, remote
-  history matches local; includes `20261112110000_enforce_non_anonymous_on_apply.sql`).
+- Migrations were applied with `supabase db push --remote` and inspected with
+  `supabase migration list --remote` (**16 applied, remote history matches
+  local**; includes `20261112110000_enforce_non_anonymous_on_apply.sql`,
+  `20261112120000_staff_invitations.sql`,
+  `20261112130000_invitation_fixes.sql`, and
+  `20261112140000_restrict_slug_and_anonymous_accept.sql`; the storage bucket
+  `restaurant-logos` was created by migration 14).
 - Because the direct database host (`db.<ref>.supabase.co`) is not reachable
   from this network, the session pooler is used instead:
   `aws-1-eu-central-1.pooler.supabase.com:5432`.
   `.env.local` (git-ignored, never committed) carries `MEZO_STAGING_PROJECT_REF`,
   `NEXT_PUBLIC_SUPABASE_URL`, keys, and `SUPABASE_DB_PASSWORD`.
-- Run the same 47 checks against staging:
+- Run the same 74 checks against staging:
 
   ```bash
   npm run test:db:staging
@@ -68,7 +72,9 @@ project (`sskooncjmymzoxlhkulh`, PostgreSQL 17.11, `eu-central-1`).
 
   This reuses the shared suite through `tests/db/staging.test.ts` with a
   transaction-scoped `SET LOCAL ROLE` probe (the pooled session does not
-  preserve `SET ROLE` across statements).
+  preserve `SET ROLE` across statements). 74 = 47 Phase 3 checks + 27 Phase 4
+  checks (profile update, tenant isolation, invitation lifecycle, deactivation,
+  multi-membership, slug immutability).
 
 - The staging run is **not** idempotent at the fixture level: the suite
   deletes only the fixture slugs and `example.test` users before recreating
@@ -102,14 +108,44 @@ and even then only rows belonging to restaurants that are both `approved` and
 payments, subscriptions and audit logs are staff-only, and audit/webhook
 tables are platform-admin-only.
 
+## Phase 4 objects: staff invitations, logos, and slug immutability
+
+Migrations 14–16 add `restaurant_staff_invitations` (roles `waiter`/`kitchen`
+only, single-use, ~244-bit tokens stored as a hash, 7-day TTL) plus the
+`restaurant-logos` storage bucket (2 MB, PNG/JPEG/WebP/AVIF, public read,
+restaurant-admin write on the folder matching the restaurant id), cleanup
+fixes (column-scoped grant on the invitation table, unambiguous RPC bodies,
+portable token hashing), and slug immutability (`UPDATE (slug)` revoked from
+`authenticated`; `protect_restaurant_review_fields()` extended to guard slug).
+Invitations are issued and consumed through the `SECURITY DEFINER` RPCs
+`invite_restaurant_staff`, `accept_restaurant_invitation`,
+`revoke_restaurant_invitation` and `deactivate_restaurant_member`; all four
+authorize off the caller's JWT and require the caller to be an active
+`restaurant_admin` of the restaurant (anonymous JWT callers are rejected).
+**No email is sent by the database** — delivery is out-of-band (the admin
+shares the one-time link manually). The token hash is `md5(token)`: unsalted
+by design, safe for a ~244-bit random input, and portable across vanilla
+PostgreSQL and PGlite (which lacks pgcrypto). service_role keeps full access;
+clients never see `token_hash`. The `/accept-invite` page is served with
+`Referrer-Policy: no-referrer`, `no-store` cache headers and
+`noindex, nofollow` robots metadata, and strips the token from the address
+bar / browser history on mount.
+
+The invitation acceptance path is `…/accept-invite?token=…` in the app; the
+token is verified against the calling user's email, is single-use, and is the
+only bearer secret involved. Anonymous sessions are rejected, and the page
+removes the token from the URL on mount.
+
 ## Phase 3+ endpoints for the guest QR flow
 
-- `anonymous_provider_disabled` is `true` on the hosted project (deliberate).
-  The QR flow is wired in this repo; flip **Authentication → Providers → Anonymous
-  Sign-ins** on the dashboard (or set `enable_anonymous_sign_ins = true` in
-  config.toml and `db push`) to activate it. The local config already has it on.
-- `config.toml` targets local dev at `http://127.0.0.1:3000`; adjust to the
-  deployed origin before pushing prod (already done on staging).
+- Anonymous sign-ins are **enabled on staging** (as of 2026-11-12). The guest
+  QR flow (Phase 4+ when that phase is approved) will consume this path:
+  `signInAnonymously()` is available on the staging project and lives at
+  `src/lib/auth/anonymous.ts`. Anonymous sessions are real
+  `authenticated`-audience users with `is_anonymous: true`; they cannot reach
+  any staff route and have zero restaurant memberships.
+- `config.toml` targets local dev at `http://127.0.0.1:3000`; staging was
+  pushed and verified on 2026-11-12.
 
 ## Type generation
 

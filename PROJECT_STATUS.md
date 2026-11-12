@@ -1,8 +1,10 @@
 # Mezo — Project Status
 
-**Last updated:** 2026-11-11
-**Phase:** 2 — Database Architecture & Security (complete and verified; awaiting approval before Phase 3)
+**Last updated:** 2026-11-12
+**Current phase:** 4 — Restaurant onboarding & workspace foundation — implementation complete and verified on staging; a final security review pass is also complete (see §13). Awaiting approval before Phase 5.
+**Phase 3:** complete and approved (PR #3 merged). **Phase 4:** implemented, tested on mezo-staging, awaiting approval.
 **Brand name:** **Mezo** — tagline: **SMART DINING. SIMPLE SERVICE.**
+**Migrations applied:** 16 (`20261111090000` … `20261112140000`) on mezo-staging
 **Verified against:** hosted Supabase project **mezo-staging** (`sskooncjmymzoxlhkulh`, PostgreSQL 17.11, `eu-central-1`) in addition to PGlite
 
 ---
@@ -950,5 +952,176 @@ part; only the email landing step is unverifiable right now.
 
 ## 10. Recommended next phase
 
-**Phase 4 — QR ordering + kitchen/waiter dashboard.** Do not start until
-approved.
+**Phase 4 was originally described here as "QR ordering + kitchen/waiter dashboard"
+— that scoping was replaced when Phase 4 shipped as restaurant onboarding and the
+workspace foundation. See section 11 (and section 12 for the true next phase).**
+
+## 11. Phase 4 — Restaurant onboarding & workspace foundation (complete, awaiting approval)
+
+**Status: implementation complete and verified on mezo-staging; awaiting explicit approval before Phase 5. No Phase 5 work has been started. Production was not modified (the only live target touched is mezo-staging).**
+
+Phase 4 supersedes the "Next phase" note in section 10 — Phase 4 was restaurant onboarding and the admin workspace foundation, not QR ordering. QR ordering, waiter actable-approval, kitchen order processing, menu management, Snippe, checkout and subscription enforcement remain Phase 5+.
+
+### What was built
+
+**Restaurant workspace (`(restaurant-admin)/restaurant/*`, admin-only, membership-verified)**
+
+- `/restaurant/dashboard` — restaurant name and logo, approval/operational/subscription badges, profile completion indicator (9 scored fields), onboarding progress, quick actions, staff overview (active members, counts by role, pending invitations), and honest, clearly labelled "Coming in Phase 5 / later phase" empty states for orders, revenue, menu and QR codes. **No invented sales, order or revenue figures anywhere.**
+- `/restaurant/onboarding` — post-approval checklist driven by real state: application approval, profile completeness (computed), staff invitations, and locked items labelled for later phases.
+- `/restaurant/settings` — settings overview with live links (profile, staff, approval read-only) and disabled "Phase 5 / later phase" cards for menu/QR, billing and notifications.
+- `/restaurant/settings/profile` — owner-editable profile (name, description, logo, contact email/phone, address lines, city, region, country code) with Zod validation and the platform-controlled fields (slug, application/operational/subscription status, member-since) shown read-only.
+- `/restaurant/settings/staff` — invite waiters/kitchen, staff roster with role badges, deactivation with destructive-action confirmation, pending invitations with revocation.
+- `/accept-invite` (staff area) — single-use token acceptance; redirects the user to their role console on success.
+- Responsive shell: persistent sidebar on desktop (`WorkspaceShell`), hamburger-triggered panel on mobile, breadcrumb bar on desktop, Mezo branding, `aria-current` nav, skip-to-content link, accessible labels, visible focus states, and loading skeletons (`loading.tsx` for dashboard/onboarding/settings/profile/staff via a shared `WorkspaceLoadingSkeleton`).
+
+**Multi-restaurant membership.** A user may administer several restaurants; the sidebar shows a restaurant selector when more than one exists (deterministic first-membership default otherwise). Every workspace page and server action resolves `?restaurant=<slug>` strictly against the caller's memberships — a slug that is not among the caller's restaurants renders **404**, and no data from another tenant is ever returned.
+
+**Logo management.** Supabase Storage bucket `restaurant-logos` (public, 2 MB, PNG/JPEG/WebP/AVIF only) created in migration 14. Flow: browser requests a short-lived **signed upload URL** from the server (after Zod validation of content type and size, and after membership verification), uploads bytes directly to storage, then confirms — the server updates `restaurants.logo_url` only when the path starts with the restaurant's own id. Storage RLS policy `restaurant_logos_admin_write` allows writes only into the folder of a restaurant the caller actively administers.
+
+**Profile update.** Server action `updateRestaurantProfileAction` validates with Zod, verifies the caller is an active `restaurant_admin` **of the target restaurant** (`isRestaurantAdminOf`), and updates only owner-editable columns; approval, subscription, role and lifecycle columns are not in the payload and are additionally protected by the existing `restaurants_protect_review_fields` trigger and by the table privilege grant.
+
+### Database changes (migrations 14–15, applied to mezo-staging)
+
+```
+20261112120000_staff_invitations.sql   restaurant_staff_invitations (pending/accepted/revoked/expired)
+                                       + invite/accept/revoke/deactivate RPCs
+                                       + restaurant-logos storage bucket & storage RLS policies
+                                       + ENUM staff_invitation_status
+20261112130000_invitation_fixes.sql    column-scoped SELECT grant to authenticated (token_hash stays
+                                       invisible to clients), service_role full access,
+                                       current_user_email() SECURITY DEFINER for the invitee-visibility
+                                       policy, unambiguous RPC bodies (OUT params shadowed column
+                                       names), pgcrypto-free portable token hashing (md5 over a
+                                       ~244-bit random token; documented)
+20261112140000_restrict_slug_and_anonymous_accept.sql
+                                       revoke UPDATE (slug) from authenticated entirely + trigger
+                                       guard for slug; anonymous JWT callers rejected in
+                                       accept_restaurant_invitation
+```
+
+All four migrations are applied on **mezo-staging** (16/16 applied). Migration 14 was applied in the previous session and is unchanged since; migrations 15–16 were append-only fixes (no applied migration was edited). `db push` prints `Target: project Mezo (…) · production` — the CLI label is a misnomer; this is the dedicated staging project, never the real production instance.
+
+### Staff invitations — how they work, and the honest limitation
+
+- `restaurant_admin` creates an invitation for an **email + role (`waiter` or `kitchen` only)** scoped to their own restaurant. `restaurant_admin` can never be granted by invitation — it comes only from platform approval.
+- The cleartext token (64 hex chars, ~244 bits) is returned to the admin **exactly once** and stored only as a hash. Expiry is 7 days; single use; revocation and acceptance are immediate.
+- Acceptance requires a signed-in user **whose account email matches the invitation email**; anonymous users cannot accept. On success the invitee becomes an active `waiter`/`kitchen` of that restaurant and lands on their console.
+- **No email is sent.** Staging's built-in mailer is rate-limited and no SMTP is configured for the project. Deliver the one-time acceptance link (`/accept-invite?token=…`) out of band yourself. The UI states this explicitly; **do not claim invitations were "emailed"** — they are copy-link-delivered. If SMTP delivery is required, that needs an approved decision (provider, credentials, templates, rate limits) and new tests.
+- Duplicate pending (restaurant, email, role) invitations are rejected at the RPC level (23505).
+
+### Tenant isolation — tested
+
+New shared checks (both run in PGlite and on staging; 27 added overall — 21 in this phase plus 6 final-review checks, 47 → 74; enumerations below and in §13):
+
+1. Admin A updates Restaurant A's profile → allowed; admin A updating B (direct SQL) → silently filtered by RLS, row untouched.
+2. Waiter and kitchen members → profile write silently no-ops; verified unchanged at the DB.
+3. `restaurant_admin` cannot change `application_status` (grant + `protect_restaurant_review_fields` trigger). Lifecycle columns refuse even platform admins via client `UPDATE` — lifecycle moves exclusively through `review_restaurant_application()`.
+4. Invitation creation: admin A ok; waiter/kitchen denied (42501); other-restaurant admin denied; `restaurant_admin` role rejected (22023); duplicate pending rejected (23505); token verified via hash format (md5); wrong-email acceptance rejected; correct email accepted and becomes active member; replay rejected (P0002); revoked invite cannot be accepted; revocable only by that restaurant's admin.
+5. Multi-membership: waiter granted a second restaurant is measured against exactly that membership; cannot write B's profile, cannot see C at all; revocation of A's own invitations invisible to B's admin.
+6. `deactivate_restaurant_member`: admin A cannot deactivate B's members (42501), cannot deactivate self (22023); deactivated member immediately loses restaurant read access.
+
+7. Admin A updates Restaurant A's profile → allowed; admin A updating B (direct SQL) → silently filtered by RLS, row untouched.
+8. Waiter and kitchen members → profile write silently no-ops; verified unchanged at the DB.
+9. `restaurant_admin` cannot change `application_status` (grant + `protect_restaurant_review_fields` trigger). Lifecycle columns refuse even platform admins via client `UPDATE` — lifecycle moves exclusively through `review_restaurant_application()`.
+10. Invitation creation: admin A ok; waiter/kitchen denied (42501); other-restaurant admin denied; `restaurant_admin` role rejected (22023); duplicate pending rejected (23505); token verified via crypt-hash format (md5); wrong-email acceptance rejected; correct email accepted and becomes active member; replay rejected (P0002); revoked invite cannot be accepted; revocable only by that restaurant's admin.
+11. Multi-membership: waiter granted a second restaurant is measured against exactly that membership; cannot write B's profile, cannot see C at all; revocation of A's own invitations invisible to B's admin.
+12. `deactivate_restaurant_member`: admin A cannot deactivate B's members (42501), cannot deactivate self (22023); deactivated member immediately loses restaurant read access.
+
+Tested at the API level: anonymous-like and authenticated-role JWT claims (`SET LOCAL ROLE` + `request.jwt.claims`), never by reading policy text.
+
+### Security decisions
+
+- **Never trust `restaurant_id` from the client.** Every Phase 4 action validates the payload, then verifies the caller is an active `restaurant_admin` of that restaurant before touching anything. `?restaurant=<slug>` outside the caller's memberships → 404.
+- **Service-role key stays server-only**; no Phase 4 code imports it for client or browser use.
+- **`token_hash` is invisible to clients** (column-scoped grant). RPCs accept tokens, never read them.
+- **Slug is immutable by clients** (migration 16): `UPDATE (slug)` on `restaurants` is revoked from `authenticated` entirely and the review-fields trigger also guards `slug` (defense in depth — platform admins may still change it should the grant widen in a future migration). Platform approval RPCs are unaffected; they never write slug.
+- **pgcrypto is not used** — the PGlite harness lacks it; staging keeps it in `extensions`. Token generation is `gen_random_uuid()`-based, portable everywhere, and the acceptance test suite passes on both targets.
+- Client upload size/type validation is advisory only; enforcement happens at the Storage bucket level (2 MB, MIME allowlist) and in the server action.
+
+### Test reconciliation — the 56 vs 47 report
+
+The earlier "45 → 56" figures in historical reports were stale roll-ups from different runs and different units of count (raw `it()` blocks vs `it.each()`-expanded cases, and PGlite vs staging double-counting). The single source of truth is `tests/db/shared-suite.ts` + `tests/db/database.test.ts` (+ `staging.test.ts`), which are generated counts of **individual assertions**. Phase 4 added **21 tests** there:
+
+- Phase 3 baseline (after the anonymous-apply fix): **47** on both PGlite and staging.
+- Phase 4 added 21, then the final security review added 6 more (slug ×4, expired invite, anonymous accept): **74 on both targets**, 150 unit+db overall. Unit suite: 76 (53 → 76, new `profile-completion` and `restaurant-validation` suites). The "56" figure never described any single coherent run and is dropped from the docs.
+
+### Verification results (this pass)
+
+| Check                                                                    | Result                                                                                                                               |
+| ------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------ |
+| `npm run lint`                                                           | Pass                                                                                                                                 |
+| `npm run typecheck`                                                      | Pass                                                                                                                                 |
+| `npm run format:check`                                                   | Pass                                                                                                                                 |
+| `npm run test`                                                           | Pass — superseded by §13 (150 unit+db; 74 db on PGlite)                                                                              |
+| `npm run test:db`                                                        | Pass — superseded by §13 (**74/74**)                                                                                                 |
+| `npm run test:db:staging`                                                | Pass — superseded by §13 (**74/74**)                                                                                                 |
+| `npm run build`                                                          | Pass — all 22 routes                                                                                                                 |
+| `npm audit --omit=dev`                                                   | 0 vulnerabilities                                                                                                                    |
+| Anonymous-route behaviour                                                | unchanged (no migrations to auth)                                                                                                    |
+| Browser E2E (manual, staging, `qa-*@mezo-staging.example.test` fixtures) | sign-in → dashboard → staff invite → accept on second account → deactivation path, and logo upload through signed URL → **all pass** |
+
+### Known limitations / not done
+
+1. **Email delivery is not verified and not enabled** (see Staff invitations). SMTP requires a decision and credentials.
+2. **Staging QA fixtures remain**: users `qa-admin@mezo-staging.example.test`, `qa-waiter@mezo-staging.example.test`; restaurant `qa-bistro` (approved/active) with a 168-byte test logo in the `restaurant-logos` bucket. Delete them if undesired.
+3. **Logo upload happy path verified manually in the browser only** — no automated browser test harness exists yet (Playwright not installed).
+4. ~~Slug may be changed by the restaurant admin~~ **Fixed in §13**: client `UPDATE` on slug is revoked entirely; slug is immutable for all client roles (migration 16).
+5. **Migration 14 (already applied in the previous session) shipped a broken RPC body and missing table grants; migration 15 supersedes it.** No environment consumed the broken RPCs before the fix.
+6. **No subscription enforcement, menu, QR ordering, waiter approvals, kitchen workflow, billing or Snippe** — all Phase 5+.
+
+## 12. Recommended next phase (after approval)
+
+**Phase 5 — QR ordering, table sessions, waiter approvals, kitchen board, real-time-ish order flow.** Do not start until the user approves Phase 4 explicitly.
+
+## 13. Phase 4 final security review — items resolved
+
+**Status: both review items investigated, fixed and verified on mezo-staging. Full gate re-run after the fixes (see table).**
+
+### 13.1 Slug authorization
+
+Verified the finding by exploitation, then closed it:
+
+- **PoC (confirmed before fix):** signed in as `qa-admin` via password grant, then `PATCH /rest/v1/restaurants?id=eq.<scratch> { slug: 'slug-check-hacked' }` → **HTTP 200**, DB row updated. Scratch restaurant was restored afterwards and deleted.
+- **Fix (migration `20261112140000_restrict_slug_and_anonymous_accept.sql`):** `UPDATE (slug)` on `restaurants` revoked from `authenticated` entirely (remaining owner-editable columns unchanged); `protect_restaurant_review_fields()` extended to guard `slug` as a defense-in-depth (non-platform-admin JWT → `42501`). Platform approval path (`review_restaurant_application`) unaffected — it never writes slug; application approvals continue to work (proven by the approval/status-changing suite tests).
+- **After fix (staging, scratch tenant):** same PATCH returns **HTTP 403 / SQLSTATE 42501**; slug unchanged. Scratch restaurant deleted.
+- Regression tests added (PGlite + staging): admin cannot change slug; waiter cannot; even platform admin cannot via client UPDATE (grant-level); owner-editable `name` still writable; existing application-review tests still pass. **74/74 on both targets.**
+
+Result: no role can change a restaurant's slug through any client channel. The profile form keeps slug read-only; the UI remains consistent with the database.
+
+### 13.2 Staff invitation token lifecycle
+
+Lifecycle now fully inspected and hardened:
+
+- **Entropy:** 256-bit tokens (`two UUIDv4 hexes`, 122 bits each) — 64 hex chars. Unchanged, already adequate.
+- **Storage:** only `md5(token)` stored (`token_hash unique`); the column is excluded from the `authenticated` column grant, invisible to clients.
+- **Comparison:** `i.token_hash = md5(p_token)` inside `accept_restaurant_invitation` (SECURITY DEFINER); SQLSTATE `P0002` for unknown/expired/used.
+- **Single-use:** acceptance marks `accepted` + `accepted_user_id`, enforced in one `FOR UPDATE` transaction; replay refused (tested).
+- **Expiration:** 7-day TTL checked in the accept query with row lock; regression test added (invitation forced into the past → acceptance refused).
+- **Revocation:** admins revoke; pending-only; tested.
+- **Wrong recipient:** matching emails required; tested.
+- **Anonymous acceptance:** `accept_restaurant_invitation` now rejects anonymous JWT callers up-front (`42501` "anonymous users cannot accept staff invitations"); regression test added.
+- **No third-party runtime resources on the page** (fonts self-hosted via `next/font`; no external images/scripts/requests).
+- **Token no longer lingers in browser history:** on mount, both the accept page and the login page (when `next` carries an accept-invite path) `replaceState("", "/accept-invite" | "/login")` so the address bar never keeps the token; the hidden form fields keep the prefilled token. Verified end-to-end in the browser (signed-out → login → signed-in → accept link, URL stayed clean throughout).
+- **Referrer-Policy:** `/accept-invite` responses now return `Referrer-Policy: no-referrer` ("last match wins" ordering fixed in `next.config.ts`); `Cache-Control: private, no-cache, no-store` retained.
+- **No indexing:** page metadata `robots: { index: false, follow: false }` → `<meta name="robots" content="noindex, nofollow"/>` verified in the served HTML.
+- **Token missing from app logs/metadata:** token never appears in titles/metadata/console logs; hidden `<input>` carries it only inside the form.
+- **Manual workflow preserved:** invite → one-time link → accept flow exercised again on staging with this build (works, zero console errors).
+
+### 13.3 Verification (after the fixes)
+
+| Check                           | Result                                              |
+| ------------------------------- | --------------------------------------------------- |
+| `npm run lint`                  | Pass                                                |
+| `npm run typecheck`             | Pass                                                |
+| `npm run format:check`          | Pass                                                |
+| `npm test`                      | Pass — **150** (76 unit + 74 db PGlite)             |
+| `npm run test:db`               | Pass — **74/74**                                    |
+| `npm run test:db:staging`       | Pass — **74/74**                                    |
+| `npm run build`                 | Pass — 22 routes (+ workspace `error.tsx` boundary) |
+| `npm audit --omit=dev`          | 0 vulnerabilities                                   |
+| Slug PoC after fix              | 403 / 42501; slug unchanged; scratch cleaned up     |
+| Accept-invite page headers      | `Referrer-Policy: no-referrer`, `no-store` cache    |
+| Accept-invite page meta         | `noindex, nofollow`                                 |
+| Token stripped from URL/history | Verified on the full login→accept chain             |
+
+Migrations applied on staging through **16** (`20261112140000_restrict_slug_and_anonymous_accept.sql` applied via `db push --remote --yes`). Production untouched. Phase 5 not started.
