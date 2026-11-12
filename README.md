@@ -104,7 +104,7 @@ src/
 └─ utils/                 Small shared utilities
 supabase/
 ├─ config.toml            Local Supabase CLI configuration
-├─ migrations/            Ordered SQL migrations (090000–100000)
+├─ migrations/            Ordered SQL migrations (090000–110000)
 ├─ seed.sql               Development subscription plans (no accounts)
 └─ README.md              Database workflow and role notes
 tests/

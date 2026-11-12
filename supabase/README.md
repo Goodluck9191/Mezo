@@ -53,14 +53,14 @@ Phase 2 was also verified against the dedicated **mezo-staging** Supabase
 project (`sskooncjmymzoxlhkulh`, PostgreSQL 17.11, `eu-central-1`).
 
 - Migrations were applied with `supabase db push --remote --include-seed` and
-  inspected with `supabase migration list --remote` (12 applied, remote
-  history matches local).
+  inspected with `supabase migration list --remote` (13 applied, remote
+  history matches local; includes `20261112110000_enforce_non_anonymous_on_apply.sql`).
 - Because the direct database host (`db.<ref>.supabase.co`) is not reachable
   from this network, the session pooler is used instead:
   `aws-1-eu-central-1.pooler.supabase.com:5432`.
   `.env.local` (git-ignored, never committed) carries `MEZO_STAGING_PROJECT_REF`,
   `NEXT_PUBLIC_SUPABASE_URL`, keys, and `SUPABASE_DB_PASSWORD`.
-- Run the same 45 checks against staging:
+- Run the same 47 checks against staging:
 
   ```bash
   npm run test:db:staging

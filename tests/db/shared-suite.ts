@@ -203,6 +203,29 @@ export function registerDatabaseSecuritySuite(target: "pglite" | "staging") {
   describe("restaurant application review", () => {
     let applicationId: string;
 
+    it("anonymous users cannot submit an application", async () => {
+      const failure = await expectSqlFailure(
+        world.db,
+        "authenticated",
+        world.applicant.id,
+        "select * from public.apply_for_restaurant($1, $2, $3)",
+        ["Anonymous exploit", "anonymous-exploit", "should fail"],
+        true, // isAnonymous
+      );
+      expect(failure.message.toLowerCase()).toMatch(/anonymous/);
+    });
+
+    it("unauthenticated users cannot submit an application", async () => {
+      const failure = await expectSqlFailure(
+        world.db,
+        "authenticated",
+        null,
+        "select * from public.apply_for_restaurant($1, $2, $3)",
+        ["No session exploit", "no-session-exploit", "should fail"],
+      );
+      expectPermission(failure);
+    });
+
     it("is created by the applicant, never by staff", async () => {
       const result = await runAs(
         world.db,
