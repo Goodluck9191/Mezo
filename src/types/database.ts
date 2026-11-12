@@ -1516,6 +1516,33 @@ export type Database = {
           isSetofReturn: false;
         };
       };
+      assign_subscription_plan: {
+        Args: {
+          p_plan_id: string;
+          p_renews_on?: string;
+          p_restaurant_id: string;
+          p_starts_on?: string;
+        };
+        Returns: {
+          cancelled_at: string | null;
+          created_at: string;
+          expires_on: string | null;
+          id: string;
+          plan_id: string;
+          renews_on: string | null;
+          restaurant_id: string;
+          starts_on: string;
+          status: Database["public"]["Enums"]["subscription_status"];
+          table_limit: number;
+          updated_at: string;
+        };
+        SetofOptions: {
+          from: "*";
+          to: "restaurant_subscriptions";
+          isOneToOne: true;
+          isSetofReturn: false;
+        };
+      };
       can_read_order: { Args: { p_order_id: string; p_restaurant_id: string }; Returns: boolean };
       can_write_order: { Args: { p_order_id: string; p_restaurant_id: string }; Returns: boolean };
       close_table_session: {
@@ -1541,6 +1568,36 @@ export type Database = {
           isSetofReturn: false;
         };
       };
+      create_subscription_plan: {
+        Args: {
+          p_billing_interval: Database["public"]["Enums"]["billing_interval"];
+          p_code: string;
+          p_description: string;
+          p_is_active?: boolean;
+          p_name: string;
+          p_price_tzs: number;
+          p_table_limit: number;
+        };
+        Returns: {
+          billing_interval: Database["public"]["Enums"]["billing_interval"];
+          code: string;
+          created_at: string;
+          description: string | null;
+          id: string;
+          is_active: boolean;
+          name: string;
+          price_tzs: number;
+          table_limit: number;
+          updated_at: string;
+        };
+        SetofOptions: {
+          from: "*";
+          to: "subscription_plans";
+          isOneToOne: true;
+          isSetofReturn: false;
+        };
+      };
+      current_user_email: { Args: Record<PropertyKey, never>; Returns: string };
       deactivate_restaurant_member: {
         Args: { p_member_id: string };
         Returns: {
@@ -1560,6 +1617,7 @@ export type Database = {
           isSetofReturn: false;
         };
       };
+      expire_overdue_subscriptions: { Args: Record<PropertyKey, never>; Returns: number };
       guest_can_order: {
         Args: { p_guest_session_id: string; p_restaurant_id: string; p_table_session_id: string };
         Returns: boolean;
@@ -1597,6 +1655,29 @@ export type Database = {
       is_restaurant_member: { Args: { p_restaurant_id: string }; Returns: boolean };
       is_restaurant_public: { Args: { p_restaurant_id: string }; Returns: boolean };
       owns_guest_session: { Args: { p_guest_session_id: string }; Returns: boolean };
+      record_subscription_payment: {
+        Args: {
+          p_amount_tzs: number;
+          p_failure_reason?: string;
+          p_paid_at?: string;
+          p_period_ends_on?: string;
+          p_period_starts_on?: string;
+          p_provider_reference?: string;
+          p_restaurant_id: string;
+          p_status?: Database["public"]["Enums"]["payment_status"];
+        };
+        Returns: {
+          already_recorded: boolean;
+          amount_tzs: number;
+          id: string;
+          paid_at: string;
+          provider: Database["public"]["Enums"]["payment_provider"];
+          provider_reference: string;
+          restaurant_id: string;
+          restaurant_subscription_id: string;
+          status: Database["public"]["Enums"]["payment_status"];
+        }[];
+      };
       request_table_session: {
         Args: { p_party_size?: number; p_qr_token: string };
         Returns: {
@@ -1671,7 +1752,81 @@ export type Database = {
           isSetofReturn: false;
         };
       };
+      set_subscription_plan_active: {
+        Args: { p_is_active: boolean; p_plan_id: string };
+        Returns: {
+          billing_interval: Database["public"]["Enums"]["billing_interval"];
+          code: string;
+          created_at: string;
+          description: string | null;
+          id: string;
+          is_active: boolean;
+          name: string;
+          price_tzs: number;
+          table_limit: number;
+          updated_at: string;
+        };
+        SetofOptions: {
+          from: "*";
+          to: "subscription_plans";
+          isOneToOne: true;
+          isSetofReturn: false;
+        };
+      };
+      set_subscription_status: {
+        Args: {
+          p_restaurant_id: string;
+          p_status: Database["public"]["Enums"]["subscription_status"];
+        };
+        Returns: {
+          cancelled_at: string | null;
+          created_at: string;
+          expires_on: string | null;
+          id: string;
+          plan_id: string;
+          renews_on: string | null;
+          restaurant_id: string;
+          starts_on: string;
+          status: Database["public"]["Enums"]["subscription_status"];
+          table_limit: number;
+          updated_at: string;
+        };
+        SetofOptions: {
+          from: "*";
+          to: "restaurant_subscriptions";
+          isOneToOne: true;
+          isSetofReturn: false;
+        };
+      };
       shares_restaurant_with: { Args: { p_user_id: string }; Returns: boolean };
+      update_subscription_plan: {
+        Args: {
+          p_billing_interval: Database["public"]["Enums"]["billing_interval"];
+          p_description: string;
+          p_name: string;
+          p_plan_id: string;
+          p_price_tzs: number;
+          p_table_limit: number;
+        };
+        Returns: {
+          billing_interval: Database["public"]["Enums"]["billing_interval"];
+          code: string;
+          created_at: string;
+          description: string | null;
+          id: string;
+          is_active: boolean;
+          name: string;
+          price_tzs: number;
+          table_limit: number;
+          updated_at: string;
+        };
+        SetofOptions: {
+          from: "*";
+          to: "subscription_plans";
+          isOneToOne: true;
+          isSetofReturn: false;
+        };
+      };
     };
     Enums: {
       application_status: "pending" | "approved" | "rejected";

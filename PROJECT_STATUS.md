@@ -1,10 +1,10 @@
 # Mezo — Project Status
 
 **Last updated:** 2026-11-12
-**Current phase:** 4 — Restaurant onboarding & workspace foundation — implementation complete and verified on staging; a final security review pass is also complete (see §13). Awaiting approval before Phase 5.
-**Phase 3:** complete and approved (PR #3 merged). **Phase 4:** implemented, tested on mezo-staging, awaiting approval.
+**Current phase:** 5 — Subscription management — implementation complete and verified on mezo-staging (see §14). Awaiting approval before Phase 6.
+**Phase 4:** complete and approved (final security review included, §13). **Phase 5:** implemented, tested on mezo-staging, awaiting approval.
 **Brand name:** **Mezo** — tagline: **SMART DINING. SIMPLE SERVICE.**
-**Migrations applied:** 16 (`20261111090000` … `20261112140000`) on mezo-staging
+**Migrations applied:** 17 (`20261111090000` … `20261112150000`) on mezo-staging
 **Verified against:** hosted Supabase project **mezo-staging** (`sskooncjmymzoxlhkulh`, PostgreSQL 17.11, `eu-central-1`) in addition to PGlite
 
 ---
@@ -1092,7 +1092,7 @@ Result: no role can change a restaurant's slug through any client channel. The p
 
 Lifecycle now fully inspected and hardened:
 
-- **Entropy:** 256-bit tokens (`two UUIDv4 hexes`, 122 bits each) — 64 hex chars. Unchanged, already adequate.
+- **Entropy:** ~244 bits (`two UUIDv4 hexes`, 122 bits each) — 64 hex chars. Adequate for single-use bearer invites.
 - **Storage:** only `md5(token)` stored (`token_hash unique`); the column is excluded from the `authenticated` column grant, invisible to clients.
 - **Comparison:** `i.token_hash = md5(p_token)` inside `accept_restaurant_invitation` (SECURITY DEFINER); SQLSTATE `P0002` for unknown/expired/used.
 - **Single-use:** acceptance marks `accepted` + `accepted_user_id`, enforced in one `FOR UPDATE` transaction; replay refused (tested).
@@ -1125,3 +1125,123 @@ Lifecycle now fully inspected and hardened:
 | Token stripped from URL/history | Verified on the full login→accept chain             |
 
 Migrations applied on staging through **16** (`20261112140000_restrict_slug_and_anonymous_accept.sql` applied via `db push --remote --yes`). Production untouched. Phase 5 not started.
+
+## 14. Phase 5 — Subscription management (complete, awaiting approval)
+
+**Status: implementation complete and verified on mezo-staging. Nothing unverified is claimed as working; no comment/claim of recurring Snippe billing is made. Production untouched. Awaiting approval before Phase 6.**
+
+Phase 5 lets the platform manage plans and restaurant subscriptions, and lets restaurant administrators see their plan, table allowance/usage and billing history without client-side privilege to change them. Customer food ordering, QR codes, waiter/kitchen workflows, checkout and food payments remain later phases.
+
+### 14.1 What was built
+
+**Subscription plans (platform-only management)**
+
+- Catalogue reuses the existing `subscription_plans` table — **no new tables, no edited applied migrations**. New tiers added in migration 17: `business_monthly` (placeholder 50 tables, price TZS 0) and `enterprise_monthly` (custom arrangement, 10000-table cap). All prices are placeholders pending commercial approval; 0 = custom relationship (not a real quote).
+- Platform admins can create, update, deactivate/reactivate plans through `create_subscription_plan`, `update_subscription_plan`, `set_subscription_plan_active` RPCs. Codes immutable; prices/limits change only for future subscribers; deactivation hides a plan without touching assignments.
+- Direct market-wide client `UPDATE` of the catalogue continues to be impossible (no client UPDATE grant) — plans change only via RPCs or service_role.
+
+**Restaurant subscription lifecycle**
+
+- Lifecycle lives on the existing `restaurant_subscriptions.status` enum: `pending → active | expired | cancelled; active → past_due | expired | cancelled; past_due → active | expired | cancelled; expired → active | cancelled`. `cancelled` is terminal. `pending` cannot be transitioned into. `past_due` is the "suspended-like" dunning state; expiry per row is triggered by `renews_on` or an operator calling `expire_overdue_subscriptions()`.
+- Terminal transitions record audit rows automatically; `sync_restaurant_subscription_status()` keeps `restaurants.subscription_status` in step. `review_restaurant_application()` continues to create the initial subscription on approval — unchanged behavior.
+
+**Platform administration**
+
+- `/platform` gained a section nav (Applications · Subscriptions · Plan catalogue); `/platform/plans` lists the catalogue with inline row editors (name, price, interval, table limit, active toggle) and a create-form (all entries are placeholders until commercial approval). `/platform/subscriptions` shows all subscriptions with status tiles + plan/status filters; `/platform/subscriptions/[id]` shows plan details, table usage (0/N with progress bar), lifecycle actions (Mark past due / Mark expired / Cancel with confirmation), an "assign plan" form, and a manual payment recorder (idempotent on provider reference). `/platform/plans` + `/platform/subscriptions[/id]` + `/restaurant/billing` nav links; the reports were re-verified in the live browser. **Existing `/platform` application-approval flow untouched.**
+
+**Restaurant workspace**
+
+- `/restaurant/billing` (new): current plan card, table-usage indicator, subscription status, monthly-price-or-custom placeholder label, term dates (start/renews/expires), live payment history, lifecycle consequence copy per status. All data read-only to restaurant admins; upgrade guidance links to nothing — contact the platform.
+- Dashboard gains a subscription strip (plan + status + table usage + renewal date) linking to billing. `Subscription & billing` added to Settings sidebar nav.
+
+**Table-limit enforcement (unchanged philosophy, hardened)**
+
+- `enforce_table_limit()` now takes `SELECT ... FOR UPDATE` on the current subscription row before counting, so concurrent inserts serialize rather than both passing under `READ COMMITTED`. Applies to service-role and direct REST inserts alike.
+- Lowering a limit never deletes tables; the restaurant keeps every table and is simply blocked from adding another beyond the bound (and error text says so). Over-limit restaurants cannot create further tables.
+
+### 14.2 New migration (applied to staging; production untouched)
+
+```
+20261112150000_subscription_management.sql
+   + catalogue: business_monthly, enterprise_monthly (placeholders, marked as such)
+   + enforce_table_limit() with FOR UPDATE subscription-row lock (concurrency-safe count)
+   + RPCs: create_subscription_plan, update_subscription_plan, set_subscription_plan_active,
+          assign_subscription_plan (terminates current term atomically, audits),
+          set_subscription_status (full lifecycle state machine enforced server-side),
+          record_subscription_payment (idempotent on (provider, provider_reference);
+          returns already_recorded for safe retry), expire_overdue_subscriptions
+   + audit_logs entries on every admin action (plan CRUD active-toggle, assign, status change, payment)
+```
+
+Grants continued deny-by-default; clients get `EXECUTE` only on the platform-admin RPCs; authorization is enforced inside each function via `is_platform_admin()` / `auth.uid()`. No new roles were added; no applied migration was edited.
+
+### 14.3 Tenant isolation and authorization
+
+- Subscriptions read: restaurant admins see only their own restaurant's rows (RLS `restaurant_subscriptions_select_admin`); platform admins select all. Payments: restaurant admin read-only for own, platform all; direct client inserts/updates/deletes are denied at the privilege level (verified by tests).
+- Audit logs: platform-admin read-only; nobody else reads or writes (tested).
+- `?restaurant=` switching never leaks data — every Phase 4 surface still scoped by membership.
+- Service-role keys remain server-only; nothing changed there.
+
+### 14.4 Snippe / billing boundary — what was verified vs not
+
+Verified in this phase:
+
+- `subscription_payments` schema in place, seed catalogue intact, payment RPCs are administrator-only, idempotency works (re-submission with the same provider reference returns `already_recorded=true` instead of double-billing), payments appear in both platform and restaurant views exactly as recorded.
+
+**Not verified, not claimed:**
+
+- No live Snippe collection was initiated.
+- No claim that Snippe supports recurring billing / subscriptions / standing orders is made — the provider's actual capabilities, webhook signing scheme, and idempotency guarantees must be confirmed with Snippe first (or from their docs) before automatic renewal/auto-charge is enabled.
+- Rows recorded via the UI are operator-attested, not provider-verified. A later webhook integration must verify signatures before writing success.
+- Open items for the provider call: (1) authentication scheme for Snippe API keys, (2) webhook signature scheme, (3) invoice/checkout object model and expiry semantics, (4) partial/failed-payment retry behavior, (5) whether categories/catalog endpoints use the same auth context, (6) rate limits, (7) whether test-mode keys exist for staging.
+
+### 14.5 Lifecycle behavior (documented contract)
+
+| State       | Format input                    | Consequence                                                                                                                                       |
+| ----------- | ------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `pending`   | after approval before payment   | Tables allowed; no billing yet; activate by platform                                                                                              |
+| `active`    | in good standing                | Tables allowed up to plan limit; payment history active; can be paid at any time                                                                  |
+| `past_due`  | payment overdue                 | Tables remain allowed; flagged in dashboard + platform; contact platform to settle                                                                |
+| `expired`   | renewal reached without payment | Existing tables work; **new table inserts rejected** (23514); re-activatable by platform via `set_subscription_status(..., active)` after payment |
+| `cancelled` | terminal                        | Existing tables work; **new table inserts rejected**; re-assignment only (no transition back to active directly)                                  |
+
+### 14.6 UI routes
+
+| Route                          | Purpose                                                                 | Access                  |
+| ------------------------------ | ----------------------------------------------------------------------- | ----------------------- |
+| `/restaurant/billing`          | Plan, usage, lifecycle, payment history (read-only to restaurant admin) | `restaurant_admin` only |
+| `/restaurant/dashboard`        | subscription strip linking to billing                                   | `restaurant_admin` only |
+| `/platform`                    | apps (unchanged) + section nav                                          | `platform_admin` only   |
+| `/platform/subscriptions`      | list + tiles + filters + overdue sweep                                  | `platform_admin` only   |
+| `/platform/subscriptions/[id]` | detail + lifecycle + assign/change plan + manual payment recording      | `platform_admin` only   |
+| `/platform/plans`              | catalogue + create/edit/(de)activate                                    | `platform_admin` only   |
+
+Restaurants cannot see Plan/Subscriptions administration; `/platform*` returns you to `/` if you are not `platform_admin` (confirmed via redirect test matches Phase 3/4 behavior, unchanged).
+
+### 14.7 Verification results
+
+| Check                                         | Result                                                                                                                                                                                                                                           |
+| --------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `npm run lint` / `typecheck` / `format:check` | Pass                                                                                                                                                                                                                                             |
+| `npm run test`                                | Pass — 100 unit + 93 db (PGlite) = **193**                                                                                                                                                                                                       |
+| `npm run test:db`                             | Pass — **93/93** PGlite                                                                                                                                                                                                                          |
+| `npm run test:db:staging`                     | Pass — **93/93** mezo-staging                                                                                                                                                                                                                    |
+| `npm run build`                               | Pass — 24 routes                                                                                                                                                                                                                                 |
+| `npm audit --omit=dev`                        | 0 vulnerabilities                                                                                                                                                                                                                                |
+| Manual browser E2E on staging                 | platform admin login → subscriptions list → detail, assign plan (Tiny Diner: Starter→Growth), record payment (reference idempotency tested), platform plans CRUD demo (row save, active/inactive toggle), restaurant billing page — all verified |
+| Anonymous/RBAC redirect behavior              | unchanged                                                                                                                                                                                                                                        |
+
+### 14.8 Known limitations
+
+1. **Prices are placeholders.** All plan prices are development placeholders; Business and Enterprise ship with custom-pricing markers. Final commercial terms require explicit approval.
+2. **Enterprise table limit (10000).** Schema requires an integer; Enterprise's 10000 is a ceiling, not a commitment. Setting it per-customer belongs to Phase 6 design discussion or an admin action.
+3. **`past_due` ≠ blocked.** Past-due restaurants keep table creation (dunning window); expiration is the hard stop. This is deliberate, documented, and enforceable only via `expire_overdue_subscriptions()` or an operator manually expiring.
+4. **Subscriptions are recorded manually.** Every payment entry in this phase is operator-annotated; there is no webhook and no automatic collection or renewal until Snippe's capabilities are verified.
+5. **Existing subscription rows are not retro-"fixed" for table limits.** `table_limit` is a snapshot of the plan at assignment time; historic rows keep their snapshot (correct by design). A plan-wide limit change after assignment only affects restaurants subscribing after the change — the platform revert/reset flow this uses is the assign-plan RPC.
+6. **Two plans are not assignable in staging:** fixture subscriptions span both approved apps, but real production catalogue needs commercial terms before use.
+7. **`expire_overdue_subscriptions()` is manual.** No cron is configured yet on staging or prod. Trigger via the platform sweep button or an operator SQL call.
+8. Audit logs are append-only insert-only; pruning/export is a later-phase decision.
+
+## 15. Recommended next phase (after approval)
+
+**Phase 6 — QR ordering / customer flow.** Do not start until Phase 5 is explicitly approved.
