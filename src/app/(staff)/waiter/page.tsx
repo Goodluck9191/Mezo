@@ -35,7 +35,7 @@ export default async function WaiterPage() {
 
       <h1 className="mt-4 text-2xl font-semibold tracking-tight sm:text-3xl">Tables and guests</h1>
       <p className="mt-2 text-sm leading-6 text-muted">
-        You see the tables where you work. Live ordering and approvals arrive in Phase 4.
+        You see the tables where you work. Live ordering and approvals arrive in Phase 5.
       </p>
 
       <ul className="mt-6 grid gap-4">

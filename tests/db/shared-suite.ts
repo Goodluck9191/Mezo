@@ -1154,4 +1154,636 @@ export function registerDatabaseSecuritySuite(target: "pglite" | "staging") {
       expect(rows[0]!.n).toBeGreaterThanOrEqual(3);
     });
   });
+
+  describe("phase 4 — restaurant profile and staff invitations", () => {
+    let inviteToken: string | undefined;
+    let secondInviteId: string | undefined;
+    let inviteeUserId: string | undefined;
+
+    it("lets a restaurant admin update their own restaurant profile", async () => {
+      await runAs(
+        world.db,
+        "authenticated",
+        world.adminA.id,
+        "update public.restaurants set name = $2, description = $3 where id = $1",
+        [world.restaurantA, "Demo Cafe Updated", "Best pilau in town"],
+      );
+
+      const rows = await queryRows(
+        world.db,
+        "service_role",
+        null,
+        "select name, description from public.restaurants where id = $1",
+        [world.restaurantA],
+      );
+      expect(rows[0]).toMatchObject({
+        name: "Demo Cafe Updated",
+        description: "Best pilau in town",
+      });
+    });
+
+    it("blocks a restaurant admin from changing application_status", async () => {
+      // Direct UPDATE of lifecycle columns is refused at the privilege level
+      // (only owner-editable columns are granted), and the review trigger
+      // would also raise 42501 — both are acceptable denials here.
+      const failure = await expectSqlFailure(
+        world.db,
+        "authenticated",
+        world.adminA.id,
+        "update public.restaurants set application_status = 'pending' where id = $1",
+        [world.restaurantA],
+      );
+      expect(
+        failure.code === "42501" || /permission denied/i.test(failure.message),
+        `expected a permission failure, got: ${failure.message}`,
+      ).toBe(true);
+    });
+
+    it("never allows direct writes to lifecycle columns — lifecycles move through the review RPC only", async () => {
+      const scratch = crypto.randomUUID();
+      await world.db.query(
+        "insert into public.restaurants (id, name, slug, application_status, operational_status, created_by) values ($1, $2, $3, 'pending', 'suspended', $4)",
+        [scratch, "Scratch Phase 4", "scratch-phase4", world.platformAdmin.id],
+      );
+
+      // Even a platform admin cannot move lifecycle columns with a direct
+      // client UPDATE: the privilege grant covers only owner-editable columns.
+      const failure = await expectSqlFailure(
+        world.db,
+        "authenticated",
+        world.platformAdmin.id,
+        "update public.restaurants set application_status = 'approved' where id = $1",
+        [scratch],
+      );
+      expect(
+        failure.code === "42501" || /permission denied/i.test(failure.message),
+        `expected a permission failure, got: ${failure.message}`,
+      ).toBe(true);
+
+      // A restaurant admin of another restaurant: with a column they may
+      // write (name), RLS filters the row out silently…
+      await runAs(
+        world.db,
+        "authenticated",
+        world.adminB.id,
+        "update public.restaurants set name = 'Hacked Scratch' where id = $1",
+        [scratch],
+      );
+
+      const untouched = await queryRows<{ name: string }>(
+        world.db,
+        "service_role",
+        null,
+        "select name from public.restaurants where id = $1",
+        [scratch],
+      );
+      expect(untouched[0]!.name).toBe("Scratch Phase 4");
+
+      // …and with a lifecycle column, the privilege grant refuses outright.
+      const blocked = await expectSqlFailure(
+        world.db,
+        "authenticated",
+        world.adminB.id,
+        "update public.restaurants set application_status = 'approved' where id = $1",
+        [scratch],
+      );
+      expect(
+        blocked.code === "42501" || /permission denied/i.test(blocked.message),
+        `expected a permission failure, got: ${blocked.message}`,
+      ).toBe(true);
+
+      await world.db.query("delete from public.restaurants where id = $1", [scratch]);
+    });
+
+    it("blocks a waiter from changing the restaurant profile (RLS)", async () => {
+      await runAs(
+        world.db,
+        "authenticated",
+        world.waiterA.id,
+        "update public.restaurants set name = $2 where id = $1",
+        [world.restaurantA, "Hacked Cafe A"],
+      );
+      const rows = await queryRows<{ name: string }>(
+        world.db,
+        "service_role",
+        null,
+        "select name from public.restaurants where id = $1",
+        [world.restaurantA],
+      );
+      expect(rows[0]!.name).toBe("Demo Cafe Updated");
+    });
+
+    it("blocks kitchen staff from changing the restaurant profile (RLS)", async () => {
+      await runAs(
+        world.db,
+        "authenticated",
+        world.kitchenA.id,
+        "update public.restaurants set name = $2 where id = $1",
+        [world.restaurantA, "Hacked Cafe A"],
+      );
+      const rows = await queryRows<{ name: string }>(
+        world.db,
+        "service_role",
+        null,
+        "select name from public.restaurants where id = $1",
+        [world.restaurantA],
+      );
+      expect(rows[0]!.name).toBe("Demo Cafe Updated");
+    });
+
+    it("blocks admin A from changing restaurant B's profile even via direct SQL", async () => {
+      await runAs(
+        world.db,
+        "authenticated",
+        world.adminA.id,
+        "update public.restaurants set name = $2 where id = $1",
+        [world.restaurantB, "Hacked Cafe B"],
+      );
+      const rows = await queryRows<{ name: string }>(
+        world.db,
+        "service_role",
+        null,
+        "select name from public.restaurants where id = $1",
+        [world.restaurantB],
+      );
+      expect(rows[0]!.name).toBe("Other Bistro");
+    });
+
+    it("lets a restaurant admin invite a waiter with a single-use hashed token", async () => {
+      const rows = await queryRows<{
+        id: string;
+        email: string;
+        role: string;
+        status: string;
+        token: string;
+      }>(
+        world.db,
+        "authenticated",
+        world.adminA.id,
+        "select id, email, role, status, token from public.invite_restaurant_staff($1, $2, 'waiter'::public.restaurant_role)",
+        [world.restaurantA, "newhire@example.test"],
+      );
+
+      expect(rows[0]).toMatchObject({
+        email: "newhire@example.test",
+        role: "waiter",
+        status: "pending",
+      });
+      inviteToken = rows[0]!.token;
+
+      // The cleartext token must never be stored; md5 of a 244-bit random
+      // token is the only stored form.
+      const stored = await queryRows<{ token_hash: string }>(
+        world.db,
+        "service_role",
+        null,
+        "select token_hash from public.restaurant_staff_invitations where id = $1",
+        [rows[0]!.id],
+      );
+      expect(stored[0]!.token_hash).not.toBe(inviteToken);
+      expect(stored[0]!.token_hash).toMatch(/^[0-9a-f]{32}$/);
+    });
+
+    it("waiter cannot invite staff", async () => {
+      const failure = await expectSqlFailure(
+        world.db,
+        "authenticated",
+        world.waiterA.id,
+        "select public.invite_restaurant_staff($1, $2, 'waiter'::public.restaurant_role)",
+        [world.restaurantA, "sneaky@example.test"],
+      );
+      expectPermission(failure);
+    });
+
+    it("kitchen cannot invite staff", async () => {
+      const failure = await expectSqlFailure(
+        world.db,
+        "authenticated",
+        world.kitchenA.id,
+        "select public.invite_restaurant_staff($1, $2, 'kitchen'::public.restaurant_role)",
+        [world.restaurantA, "sneaky2@example.test"],
+      );
+      expectPermission(failure);
+    });
+
+    it("a restaurant admin of B cannot invite for A", async () => {
+      const failure = await expectSqlFailure(
+        world.db,
+        "authenticated",
+        world.adminB.id,
+        "select public.invite_restaurant_staff($1, $2, 'waiter'::public.restaurant_role)",
+        [world.restaurantA, "sneaky3@example.test"],
+      );
+      expectPermission(failure);
+    });
+
+    it("rejects restaurant_admin as an invited role", async () => {
+      const failure = await expectSqlFailure(
+        world.db,
+        "authenticated",
+        world.adminA.id,
+        "select public.invite_restaurant_staff($1, $2, 'restaurant_admin'::public.restaurant_role)",
+        [world.restaurantA, "sneaky4@example.test"],
+      );
+      expect(
+        failure.code === "22023" || /waiter or kitchen/i.test(failure.message),
+        `expected an invalid-role failure, got: ${failure.message}`,
+      ).toBe(true);
+    });
+
+    it("rejects a duplicate pending invitation for the same email and role", async () => {
+      const failure = await expectSqlFailure(
+        world.db,
+        "authenticated",
+        world.adminA.id,
+        "select public.invite_restaurant_staff($1, $2, 'waiter'::public.restaurant_role)",
+        [world.restaurantA, "newhire@example.test"],
+      );
+      expect(
+        failure.code === "23505" || /already exists/i.test(failure.message),
+        `expected a duplicate failure, got: ${failure.message}`,
+      ).toBe(true);
+    });
+
+    it("the invitation cannot be accepted by a different email account", async () => {
+      const intruderId = crypto.randomUUID();
+      // auth.users is only writable as the database owner (as in staging).
+      await world.db.query(
+        "insert into auth.users (id, email, raw_user_meta_data) values ($1, $2, '{}'::jsonb)",
+        [intruderId, "intruder@example.test"],
+      );
+
+      const failure = await expectSqlFailure(
+        world.db,
+        "authenticated",
+        intruderId,
+        "select public.accept_restaurant_invitation($1)",
+        [inviteToken],
+      );
+      expect(
+        failure.code === "42501" || /different email/i.test(failure.message),
+        `expected an address-mismatch failure, got: ${failure.message}`,
+      ).toBe(true);
+    });
+
+    it("lets the invitee accept and become an active waiter of A", async () => {
+      inviteeUserId = crypto.randomUUID();
+      await world.db.query(
+        "insert into auth.users (id, email, raw_user_meta_data) values ($1, $2, '{}'::jsonb)",
+        [inviteeUserId, "newhire@example.test"],
+      );
+
+      const rows = await queryRows<{ restaurant_slug: string; role: string }>(
+        world.db,
+        "authenticated",
+        inviteeUserId,
+        "select restaurant_slug, role from public.accept_restaurant_invitation($1)",
+        [inviteToken],
+      );
+      expect(rows[0]).toMatchObject({ restaurant_slug: "demo-cafe", role: "waiter" });
+
+      const membership = await queryRows<{ role: string; is_active: boolean }>(
+        world.db,
+        "service_role",
+        null,
+        "select role, is_active from public.restaurant_members where restaurant_id = $1 and user_id = $2",
+        [world.restaurantA, inviteeUserId],
+      );
+      expect(membership).toEqual([{ role: "waiter", is_active: true }]);
+    });
+
+    it("rejects replay of an already-used invitation token", async () => {
+      const failure = await expectSqlFailure(
+        world.db,
+        "authenticated",
+        inviteeUserId!,
+        "select public.accept_restaurant_invitation($1)",
+        [inviteToken],
+      );
+      expect(
+        failure.code === "P0002" || /invalid, expired or already used/i.test(failure.message),
+        `expected an unknown-token failure, got: ${failure.message}`,
+      ).toBe(true);
+    });
+
+    it("a revoked pending invitation can no longer be accepted", async () => {
+      const rows = await queryRows<{ id: string; token: string }>(
+        world.db,
+        "authenticated",
+        world.adminA.id,
+        "select id, token from public.invite_restaurant_staff($1, $2, 'kitchen'::public.restaurant_role)",
+        [world.restaurantA, "revoked@example.test"],
+      );
+      secondInviteId = rows[0]!.id;
+
+      await runAs(
+        world.db,
+        "authenticated",
+        world.adminA.id,
+        "select public.revoke_restaurant_invitation($1)",
+        [secondInviteId],
+      );
+
+      // And a waiter may not revoke invitations either.
+      const blocked = await expectSqlFailure(
+        world.db,
+        "authenticated",
+        world.waiterA.id,
+        "select public.revoke_restaurant_invitation($1)",
+        [secondInviteId],
+      );
+      expectPermission(blocked);
+
+      const kitchenHire = crypto.randomUUID();
+      await world.db.query(
+        "insert into auth.users (id, email, raw_user_meta_data) values ($1, $2, '{}'::jsonb)",
+        [kitchenHire, "revoked@example.test"],
+      );
+      const failure = await expectSqlFailure(
+        world.db,
+        "authenticated",
+        kitchenHire,
+        "select public.accept_restaurant_invitation($1)",
+        [rows[0]!.token],
+      );
+      expect(
+        failure.code === "P0002" || /invalid, expired or already used/i.test(failure.message),
+        `expected an unknown-token failure, got: ${failure.message}`,
+      ).toBe(true);
+    });
+
+    it("a multi-membership user acts only within the restaurant they target", async () => {
+      // Grant waiterA an additional, legitimate membership in B.
+      await runAs(
+        world.db,
+        "service_role",
+        null,
+        "insert into public.restaurant_members (restaurant_id, user_id, role) values ($1, $2, 'waiter')",
+        [world.restaurantB, world.waiterA.id],
+      );
+
+      const visible = await queryRows(
+        world.db,
+        "authenticated",
+        world.waiterA.id,
+        "select id from public.restaurants where id = $1",
+        [world.restaurantB],
+      );
+      expect(visible).toHaveLength(1);
+
+      // But waiter rights in B never extend to updating B's profile…
+      await runAs(
+        world.db,
+        "authenticated",
+        world.waiterA.id,
+        "update public.restaurants set name = $2 where id = $1",
+        [world.restaurantB, "Hacked Cafe B"],
+      );
+
+      // …and nothing at all in C.
+      const seenC = await queryRows(
+        world.db,
+        "authenticated",
+        world.waiterA.id,
+        "select id from public.restaurants where id = $1",
+        [world.restaurantC],
+      );
+      expect(seenC).toHaveLength(0);
+
+      const check = await queryRows<{ name: string }>(
+        world.db,
+        "service_role",
+        null,
+        "select name from public.restaurants where id = $1",
+        [world.restaurantB],
+      );
+      expect(check[0]!.name).toBe("Other Bistro");
+
+      // Restore the fixture's single-restaurant shape for the remaining checks.
+      await runAs(
+        world.db,
+        "service_role",
+        null,
+        "delete from public.restaurant_members where restaurant_id = $1 and user_id = $2",
+        [world.restaurantB, world.waiterA.id],
+      );
+    });
+
+    it("deactivates a staff member and they immediately lose access", async () => {
+      const target = await queryRows<{ id: string }>(
+        world.db,
+        "service_role",
+        null,
+        "select id from public.restaurant_members where restaurant_id = $1 and user_id = $2",
+        [world.restaurantA, inviteeUserId],
+      );
+
+      await runAs(
+        world.db,
+        "authenticated",
+        world.adminA.id,
+        "select public.deactivate_restaurant_member($1)",
+        [target[0]!.id],
+      );
+
+      const visible = await queryRows(
+        world.db,
+        "authenticated",
+        inviteeUserId!,
+        "select id from public.restaurants where id = $1",
+        [world.restaurantA],
+      );
+      expect(visible).toHaveLength(0);
+    });
+
+    it("a restaurant admin cannot deactivate themselves", async () => {
+      const target = await queryRows<{ id: string }>(
+        world.db,
+        "service_role",
+        null,
+        "select id from public.restaurant_members where restaurant_id = $1 and user_id = $2 and role = 'restaurant_admin'",
+        [world.restaurantA, world.adminA.id],
+      );
+      const failure = await expectSqlFailure(
+        world.db,
+        "authenticated",
+        world.adminA.id,
+        "select public.deactivate_restaurant_member($1)",
+        [target[0]!.id],
+      );
+      expect(
+        failure.code === "22023" || /own membership/i.test(failure.message),
+        `expected a self-deactivation failure, got: ${failure.message}`,
+      ).toBe(true);
+    });
+
+    it("a restaurant admin cannot deactivate a member of another restaurant", async () => {
+      const target = await queryRows<{ id: string }>(
+        world.db,
+        "service_role",
+        null,
+        "select id from public.restaurant_members where restaurant_id = $1 and user_id = $2",
+        [world.restaurantB, world.waiterB.id],
+      );
+      const failure = await expectSqlFailure(
+        world.db,
+        "authenticated",
+        world.adminA.id,
+        "select public.deactivate_restaurant_member($1)",
+        [target[0]!.id],
+      );
+      expectPermission(failure);
+    });
+
+    it("invitations of another restaurant are invisible to this restaurant's admin", async () => {
+      const rows = await queryRows(
+        world.db,
+        "authenticated",
+        world.adminB.id,
+        "select id from public.restaurant_staff_invitations where restaurant_id = $1",
+        [world.restaurantA],
+      );
+      expect(rows).toHaveLength(0);
+    });
+
+    it("a restaurant admin cannot change the restaurant slug directly", async () => {
+      const failure = await expectSqlFailure(
+        world.db,
+        "authenticated",
+        world.adminA.id,
+        "update public.restaurants set slug = 'hacked-slug' where id = $1",
+        [world.restaurantA],
+      );
+      expect(
+        failure.code === "42501" || /permission denied/i.test(failure.message),
+        `expected a permission failure, got: ${failure.message}`,
+      ).toBe(true);
+
+      const rows = await queryRows<{ slug: string }>(
+        world.db,
+        "service_role",
+        null,
+        "select slug from public.restaurants where id = $1",
+        [world.restaurantA],
+      );
+      expect(rows[0]!.slug).toBe("demo-cafe");
+    });
+
+    it("a waiter cannot change the restaurant slug directly", async () => {
+      const failure = await expectSqlFailure(
+        world.db,
+        "authenticated",
+        world.waiterA.id,
+        "update public.restaurants set slug = 'hacked-slug' where id = $1",
+        [world.restaurantA],
+      );
+      expect(
+        failure.code === "42501" || /permission denied/i.test(failure.message),
+        `expected a permission failure, got: ${failure.message}`,
+      ).toBe(true);
+    });
+
+    it("even a platform admin cannot change the slug via a client UPDATE", async () => {
+      const failure = await expectSqlFailure(
+        world.db,
+        "authenticated",
+        world.platformAdmin.id,
+        "update public.restaurants set slug = 'hacked-slug' where id = $1",
+        [world.restaurantA],
+      );
+      expect(
+        failure.code === "42501" || /permission denied/i.test(failure.message),
+        `expected a permission failure, got: ${failure.message}`,
+      ).toBe(true);
+
+      const rows = await queryRows<{ slug: string }>(
+        world.db,
+        "service_role",
+        null,
+        "select slug from public.restaurants where id = $1",
+        [world.restaurantA],
+      );
+      expect(rows[0]!.slug).toBe("demo-cafe");
+    });
+
+    it("an owner-editable field is still writable after the slug change is blocked", async () => {
+      // Name is part of the owner-editable grant; the slug change must not affect it.
+      await runAs(
+        world.db,
+        "authenticated",
+        world.adminA.id,
+        "update public.restaurants set name = 'Demo Cafe Updated' where id = $1",
+        [world.restaurantA],
+      );
+      const rows = await queryRows<{ name: string }>(
+        world.db,
+        "service_role",
+        null,
+        "select name from public.restaurants where id = $1",
+        [world.restaurantA],
+      );
+      expect(rows[0]!.name).toBe("Demo Cafe Updated");
+    });
+
+    it("an expired invitation cannot be accepted", async () => {
+      const rows = await queryRows<{ id: string; token: string }>(
+        world.db,
+        "authenticated",
+        world.adminA.id,
+        "select id, token from public.invite_restaurant_staff($1, $2, 'kitchen'::public.restaurant_role)",
+        [world.restaurantA, "expired@example.test"],
+      );
+      await world.db.query(
+        "update public.restaurant_staff_invitations set expires_at = now() - interval '1 day' where id = $1",
+        [rows[0]!.id],
+      );
+
+      const invitee = crypto.randomUUID();
+      await world.db.query(
+        "insert into auth.users (id, email, raw_user_meta_data) values ($1, $2, '{}'::jsonb)",
+        [invitee, "expired@example.test"],
+      );
+
+      const failure = await expectSqlFailure(
+        world.db,
+        "authenticated",
+        invitee,
+        "select public.accept_restaurant_invitation($1)",
+        [rows[0]!.token],
+      );
+      expect(
+        failure.code === "P0002" || /invalid, expired or already used/i.test(failure.message),
+        `expected an unknown-token failure, got: ${failure.message}`,
+      ).toBe(true);
+    });
+
+    it("an anonymous session cannot accept an invitation even with a matching email", async () => {
+      const rows = await queryRows<{ id: string; token: string }>(
+        world.db,
+        "authenticated",
+        world.adminA.id,
+        "select id, token from public.invite_restaurant_staff($1, $2, 'waiter'::public.restaurant_role)",
+        [world.restaurantA, "anonaccept@example.test"],
+      );
+
+      const anon = crypto.randomUUID();
+      await world.db.query(
+        "insert into auth.users (id, email, raw_user_meta_data) values ($1, $2, '{}'::jsonb)",
+        [anon, "anonaccept@example.test"],
+      );
+
+      const failure = await expectSqlFailure(
+        world.db,
+        "authenticated",
+        anon,
+        "select public.accept_restaurant_invitation($1)",
+        [rows[0]!.token],
+        true,
+      );
+      expect(
+        failure.code === "42501" || /anonymous/i.test(failure.message),
+        `expected an anonymous-session failure, got: ${failure.message}`,
+      ).toBe(true);
+    });
+  });
 }

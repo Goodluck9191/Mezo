@@ -1,6 +1,6 @@
 "use client";
 
-import { useActionState } from "react";
+import { useActionState, useEffect } from "react";
 import Link from "next/link";
 
 import { signIn } from "@/app/actions/auth";
@@ -11,6 +11,15 @@ import { Input } from "@/components/ui/input";
 import type { ActionResult } from "@/lib/validation/auth";
 
 export function SignInForm({ next }: { next?: string }) {
+  useEffect(() => {
+    // If the sign-in page was reached with an invitation-bearing `next`, the
+    // token is now captured in the hidden form field — scrub it from the
+    // address bar so it never lingers in browser history.
+    if (next && next.startsWith("/accept-invite")) {
+      window.history.replaceState(null, "", "/login");
+    }
+  }, [next]);
+
   const [state, formAction, pending] = useActionState<ActionResult | undefined, FormData>(
     signIn,
     undefined,
