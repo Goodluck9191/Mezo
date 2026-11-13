@@ -37,3 +37,5 @@ supabase/.temp
 .idea/
 .vscode/*
 !.vscode/extensions.json
+
+qa-server.log

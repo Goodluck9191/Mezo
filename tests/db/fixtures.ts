@@ -45,6 +45,7 @@ export interface World {
   categoryA: string;
   categoryB: string;
   itemA: string;
+  itemA2: string;
   itemB: string;
   qrA1: string;
   qrA2: string;
@@ -196,11 +197,15 @@ export async function buildWorld(target: DbTarget = "pglite"): Promise<World> {
   );
 
   const itemA = crypto.randomUUID();
+  const itemA2 = crypto.randomUUID();
   const itemB = crypto.randomUUID();
   await db.query(
-    `insert into public.menu_items (id, restaurant_id, category_id, name, price_tzs, sort_order)
-     values ($1, $2, $3, 'Pilau', 12000, 0), ($4, $5, $6, 'Other Pilau', 9000, 0)`,
-    [itemA, restaurantA, categoryA, itemB, restaurantB, categoryB],
+    `insert into public.menu_items (id, restaurant_id, category_id, name, price_tzs, sort_order, is_available)
+     values
+       ($1, $2, $3, 'Pilau', 12000, 0, true),
+       ($4, $2, $3, 'Mandazi', 2000, 1, false),
+       ($6, $5, $7, 'Other Pilau', 9000, 0, true)`,
+    [itemA, restaurantA, categoryA, itemA2, restaurantB, itemB, categoryB],
   );
 
   const tokens = await db.query<{ id: string; qr_token: string }>(
@@ -232,6 +237,7 @@ export async function buildWorld(target: DbTarget = "pglite"): Promise<World> {
     categoryA,
     categoryB,
     itemA,
+    itemA2,
     itemB,
     qrA1,
     qrA2,

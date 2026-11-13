@@ -4,7 +4,7 @@ Multi-restaurant QR ordering SaaS for dine-in restaurants in Tanzania.
 
 **SMART DINING. SIMPLE SERVICE.**
 
-> **Status: Phase 5 — subscription management complete and verified on staging; awaiting approval.** Sign-in, registration, applications, platform review, the restaurant admin workspace, and subscription management (catalogue, assignment, lifecycle, table-limit enforcement, payment records) all work end-to-end. Customer QR ordering is not yet live.
+> **Status: Phase 6 — menu management complete and verified on staging; awaiting approval.** Sign-in, applications, workspace, subscriptions, and menu management (categories, items, images, availability, public `/menu/[restaurantSlug]`) all work end-to-end. Customer QR ordering is not yet live.
 
 ## Stack
 
@@ -78,10 +78,10 @@ src/
 │  ├─ (marketing)/        Public landing page and marketing layout
 │  ├─ (auth)/             Login, register, forgot/reset password, verify email, profile
 │  ├─ auth/confirm/       Email verification + invite token handler
-│  ├─ (restaurant-admin)/ Restaurant apply, dashboard, onboarding, settings (Phase 3–4), billing (Phase 5)
+│  ├─ (restaurant-admin)/ Restaurant apply, dashboard, onboarding, settings (Phase 3–4), billing (Phase 5), menu (Phase 6)
 │  ├─ (staff)/            Waiter and kitchen consoles (Phase 3); accept-invite (Phase 4)
 │  ├─ platform/           Platform-admin area (applications; subscriptions + plans in Phase 5)
-│  ├─ (customer)/         QR menu, cart, order tracking (Phase 6)
+│  ├─ (customer)/         Public `/menu/[restaurantSlug]` (Phase 6)
 │  └─ api/
 │     └─ health/          Liveness endpoint
 │  └─ actions/            Server actions (auth, application review, profile, restaurant workspace)
@@ -89,7 +89,7 @@ src/
 │  ├─ ui/                 Reusable primitives (button, icons, input, select, textarea, skeleton)
 │  ├─ shared/             Header, footer, logo, theme toggle, ConfirmButton
 │  ├─ auth/               Sign-in/up forms, profile editor, verification page bits
-│  ├─ customer/           Customer feature components (Phase 6)
+│  ├─ customer/           Public /menu/[restaurantSlug] (Phase 6)
 │  ├─ staff/              Staff feature components
 │  ├─ restaurant/         Restaurant workspace shell, profile & staff forms, empty states, skeletons
 │  └─ platform/           Platform administration components
@@ -107,7 +107,7 @@ src/
 └─ utils/                 Small shared utilities
 supabase/
 ├─ config.toml            Local Supabase CLI configuration
-├─ migrations/            Ordered SQL migrations (090000–140000)
+├─ migrations/            Ordered SQL migrations (090000–160000)
 ├─ seed.sql               Development subscription plans (no accounts)
 └─ README.md              Database workflow and role notes
 tests/
@@ -117,7 +117,7 @@ tests/
 
 ## Database
 
-Phase 2 ships a multi-tenant PostgreSQL schema (21 tables, one public view, one storage bucket with RLS), deny-by-default client grants, and deny-by-default RLS. Authorization for tenant flows lives in Postgres; the proxy only refreshes sessions. Phase 3 adds server-side route guards in `src/lib/auth/guards.ts` — both the layouts and the server actions re-check before touching data. The proxy deliberately stays blind to roles. Phase 4 adds the `restaurant_staff_invitations` table and the `restaurant-logos` storage bucket (migration 14, fixed in 15). Phase 5 hardens table-limit enforcement (FOR UPDATE lock) and adds subscription lifecycle and payment-recording RPCs (migration 17).
+Phase 2 ships a multi-tenant PostgreSQL schema (21 tables, one public view, one storage bucket with RLS), deny-by-default client grants, and deny-by-default RLS. Authorization for tenant flows lives in Postgres; the proxy only refreshes sessions. Phase 3 adds server-side route guards in `src/lib/auth/guards.ts` — both the layouts and the server actions re-check before touching data. The proxy deliberately stays blind to roles. Phase 4 adds the `restaurant_staff_invitations` table and the `restaurant-logos` storage bucket (migration 14, fixed in 15). Phase 5 hardens table-limit enforcement (FOR UPDATE lock) and adds subscription lifecycle and payment-recording RPCs (migration 17). Phase 6 adds archive semantics + a public published-menu RPC + another storage bucket (`menu-images`) (migration 18).
 
 - **Tenant root:** `restaurants`, keyed by slug, reviewed by a platform admin before it goes live (`pending/approved/rejected`), with `active/suspended` operational state.
 - **QR tokens:** `restaurant_tables.qr_token` is 64 hex characters generated from two random UUIDs; it is a bearer secret, never sequential.
@@ -180,9 +180,9 @@ curl http://localhost:3000/api/health
 }
 ```
 
-## Restaurant workspace (Phases 3–4)
+## Restaurant workspace (Phases 3–6)
 
-Post-approval restaurant administrators get a workspace under `/restaurant/*`: a responsive dashboard (profile completion, approval/operational/subscription status, staff overview, quick actions, clearly labelled empty states for not-yet-built features), an onboarding checklist, settings (read-only platform-controlled fields plus owner-editable profile with logo upload via a short-lived signed URL), and staff management (single-use, hash-stored invitations for waiters and kitchen staff — never emailed in this environment; the one-time link is copied to the invitee out of band).
+Post-approval restaurant administrators get a workspace under `/restaurant/*`: dashboard, profile, staff, subscriptions, onboarding, and `/restaurant/menu` (categories and items with drag-and-drop-equivalent reorder, soft-archive semantics, image uploads, availability labels). The public route `/menu/[restaurantSlug]` renders the published menu to anonymous diners.
 
 - **Multi-restaurant membership is supported**: a selector appears whenever the caller administers more than one restaurant, and every page/action scopes to the chosen membership.
 - **Staff invitation flow**: `invite_restaurant_staff()` RPC issues a single-use 64-hex token (stored as a hash); invitations expire after 7 days, are tied to one restaurant, are accepted only by the account whose email matches, and can be revoked by that restaurant's admins. No `restaurant_admin` role can ever be granted by invitation.
@@ -202,4 +202,4 @@ Restaurant admins see their plan, table usage, status and payment history at `/r
 
 ## Next phase
 
-**Phase 6 — QR ordering, table sessions, waiter and kitchen flows.** Do not start until Phase 5 is explicitly approved. See `PROJECT_STATUS.md`.
+**Phase 7 — QR ordering, table sessions, waiter and kitchen flows.** Do not start until Phase 6 is explicitly approved. See `PROJECT_STATUS.md`.

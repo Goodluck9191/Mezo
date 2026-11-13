@@ -16,6 +16,7 @@ import {
   toShellMemberships,
 } from "@/lib/restaurant";
 import { getRestaurantSubscriptionView } from "@/lib/subscription";
+import { menuCountsForRestaurant } from "@/lib/menu";
 import { computeProfileCompletion } from "@/lib/profile-completion";
 import { siteConfig } from "@/lib/site";
 import { cn } from "@/utils/cn";
@@ -38,6 +39,8 @@ export default async function RestaurantOnboardingPage({
   const staff = await getStaffForRestaurant(restaurant.id);
   const staffSummary = summarizeStaff(staff);
   const { subscription } = await getRestaurantSubscriptionView(restaurant.id);
+  const menuCounts = await menuCountsForRestaurant(restaurant.id);
+  const menuLive = menuCounts.items > 0;
 
   const completion = computeProfileCompletion({
     name: restaurant.name,
@@ -87,10 +90,16 @@ export default async function RestaurantOnboardingPage({
       href: `/restaurant/settings/staff?restaurant=${encodeURIComponent(restaurant.slug)}`,
     },
     {
-      label: "Menu, tables and QR codes",
-      detail: "Planned for Phase 6 — customer ordering ships there.",
+      label: "Build your menu",
+      detail: "Add categories and items — they appear in the public menu immediately.",
+      done: menuLive,
+      href: `/restaurant/menu?restaurant=${encodeURIComponent(restaurant.slug)}`,
+    },
+    {
+      label: "Tables and QR codes",
+      detail: "Planned for Phase 7 — QR codes and table occupancy ships there.",
       done: false,
-      locked: "Phase 6",
+      locked: "Phase 7",
     },
     {
       label: "Subscription and billing",

@@ -53,13 +53,14 @@ Phase 2 was also verified against the dedicated **mezo-staging** Supabase
 project (`sskooncjmymzoxlhkulh`, PostgreSQL 17.11, `eu-central-1`).
 
 - Migrations were applied with `supabase db push --remote` and inspected with
-  `supabase migration list --remote` (**17 applied, remote history matches
+  `supabase migration list --remote` (**18 applied, remote history matches
   local**; includes `20261112110000_enforce_non_anonymous_on_apply.sql`,
   `20261112120000_staff_invitations.sql`,
   `20261112130000_invitation_fixes.sql`,
-  `20261112140000_restrict_slug_and_anonymous_accept.sql`, and
-  `20261112150000_subscription_management.sql`; the storage bucket
-  `restaurant-logos` was created by migration 14).
+  `20261112140000_restrict_slug_and_anonymous_accept.sql`,
+  `20261112150000_subscription_management.sql`, and
+  `20261112160000_menu_management.sql`; the storage buckets `restaurant-logos`
+  and `menu-images` were created there).
 - Because the direct database host (`db.<ref>.supabase.co`) is not reachable
   from this network, the session pooler is used instead:
   `aws-1-eu-central-1.pooler.supabase.com:5432`.

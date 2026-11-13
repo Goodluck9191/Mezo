@@ -149,6 +149,7 @@ export type Database = {
       };
       menu_categories: {
         Row: {
+          archived_at: string | null;
           created_at: string;
           description: string | null;
           id: string;
@@ -160,6 +161,7 @@ export type Database = {
         };
         ComputedFields: never;
         Insert: {
+          archived_at?: string | null;
           created_at?: string;
           description?: string | null;
           id?: string;
@@ -170,6 +172,7 @@ export type Database = {
           updated_at?: string;
         };
         Update: {
+          archived_at?: string | null;
           created_at?: string;
           description?: string | null;
           id?: string;
@@ -198,6 +201,7 @@ export type Database = {
       };
       menu_items: {
         Row: {
+          archived_at: string | null;
           category_id: string;
           created_at: string;
           description: string | null;
@@ -212,6 +216,7 @@ export type Database = {
         };
         ComputedFields: never;
         Insert: {
+          archived_at?: string | null;
           category_id: string;
           created_at?: string;
           description?: string | null;
@@ -225,6 +230,7 @@ export type Database = {
           updated_at?: string;
         };
         Update: {
+          archived_at?: string | null;
           category_id?: string;
           created_at?: string;
           description?: string | null;
@@ -1618,6 +1624,33 @@ export type Database = {
         };
       };
       expire_overdue_subscriptions: { Args: Record<PropertyKey, never>; Returns: number };
+      get_public_menu: {
+        Args: { p_slug: string };
+        Returns: {
+          category_description: string;
+          category_id: string;
+          category_name: string;
+          category_sort_order: number;
+          is_available: boolean;
+          item_description: string;
+          item_id: string;
+          item_image_url: string;
+          item_name: string;
+          item_sort_order: number;
+          price_tzs: number;
+          restaurant_address_line1: string;
+          restaurant_address_line2: string;
+          restaurant_city: string;
+          restaurant_contact_phone: string;
+          restaurant_country_code: string;
+          restaurant_description: string;
+          restaurant_id: string;
+          restaurant_logo_url: string;
+          restaurant_name: string;
+          restaurant_region: string;
+          restaurant_slug: string;
+        }[];
+      };
       guest_can_order: {
         Args: { p_guest_session_id: string; p_restaurant_id: string; p_table_session_id: string };
         Returns: boolean;
