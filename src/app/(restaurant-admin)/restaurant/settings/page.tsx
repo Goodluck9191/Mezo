@@ -146,11 +146,11 @@ export default async function RestaurantSettingsPage({
               </StatusBadge>
             }
           />
-          <DisabledCard
+          <SettingCard
+            href={`/restaurant/menu${suffix}`}
             icon={<QrCodeIcon className="size-5" />}
-            title="Menu, tables & QR codes"
-            description="Menu management and QR code generation arrive with the ordering phase."
-            badge="Phase 6"
+            title="Menu"
+            description="Create categories and items, upload images, control availability."
           />
           <SettingCard
             href={`/restaurant/billing${suffix}`}

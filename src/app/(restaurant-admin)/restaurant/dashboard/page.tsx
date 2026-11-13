@@ -299,7 +299,13 @@ export default async function RestaurantDashboardPage({
         </div>
 
         {/* Quick actions */}
-        <section aria-label="Quick actions" className="grid gap-3 sm:grid-cols-3">
+        <section aria-label="Quick actions" className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+          <QuickActionLink
+            href={`/restaurant/menu?restaurant=${encodeURIComponent(restaurant.slug)}`}
+            title="Manage menu"
+            description="Categories, items, images and availability."
+            icon={<UtensilsIcon className="size-5" />}
+          />
           <QuickActionLink
             href={`/restaurant/settings/profile?restaurant=${encodeURIComponent(restaurant.slug)}`}
             title="Edit restaurant profile"
@@ -328,7 +334,7 @@ export default async function RestaurantDashboardPage({
           <div className="grid gap-3 sm:grid-cols-2">
             <EmptyState
               icon={<ClipboardListIcon className="size-5" />}
-              title="Orders — Coming in Phase 6"
+              title="Orders — Coming in Phase 7"
               description="Live orders from tables will appear here once customer ordering ships."
             />
             <EmptyState
@@ -342,9 +348,9 @@ export default async function RestaurantDashboardPage({
               description="Payments and payouts are handled by a later billing phase; no figures exist yet."
             />
             <EmptyState
-              icon={<UsersIcon className="size-5" />}
-              title="Menu management — Coming in Phase 6"
-              description="Categories and items will be managed here starting with the menu phase."
+              icon={<UtensilsIcon className="size-5" />}
+              title="Menu — complete"
+              description="Menu management ships in this phase. Categories, items, images and availability are live under Menu."
             />
           </div>
         </Panel>

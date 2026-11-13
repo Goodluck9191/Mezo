@@ -1,10 +1,10 @@
 # Mezo — Project Status
 
-**Last updated:** 2026-11-12
-**Current phase:** 5 — Subscription management — implementation complete and verified on mezo-staging (see §14). Awaiting approval before Phase 6.
-**Phase 4:** complete and approved (final security review included, §13). **Phase 5:** implemented, tested on mezo-staging, awaiting approval.
+**Last updated:** 2026-11-13
+**Current phase:** 6 — Menu management — implementation complete and verified on mezo-staging (see §16). Awaiting approval before Phase 7.
+**Phase 5:** complete and approved (see §14). **Phase 6:** implemented, tested on mezo-staging, awaiting approval.
 **Brand name:** **Mezo** — tagline: **SMART DINING. SIMPLE SERVICE.**
-**Migrations applied:** 17 (`20261111090000` … `20261112150000`) on mezo-staging
+**Migrations applied:** 18 (`20261111090000` … `20261112160000`) on mezo-staging
 **Verified against:** hosted Supabase project **mezo-staging** (`sskooncjmymzoxlhkulh`, PostgreSQL 17.11, `eu-central-1`) in addition to PGlite
 
 ---
@@ -1244,4 +1244,126 @@ Restaurants cannot see Plan/Subscriptions administration; `/platform*` returns y
 
 ## 15. Recommended next phase (after approval)
 
-**Phase 6 — QR ordering / customer flow.** Do not start until Phase 5 is explicitly approved.
+**Phase 7 — QR ordering / customer flow.** Do not start until Phase 6 is explicitly approved.
+
+## 16. Phase 6 — Menu management (complete, awaiting approval)
+
+**Status: implementation complete and verified on mezo-staging. Production was not modified. No Phase 7 work started. Awaiting explicit approval of Phase 6.**
+
+Phase 6 lets restaurant administrators manage their menus, exposes a narrow public anonymous menu at `/menu/[restaurantSlug]`, and enforces archive-not-delete semantics everywhere. It is the first phase to expose tenant data publicly.
+
+### 16.1 What was built
+
+**Restaurant workspace (`/restaurant/menu*`, admin-only)**
+
+- `/restaurant/menu` — menu overview with live totals (categories, items, available/unavailable), search + category filter, and an items table with inline actions (availability toggle, edit, archive/restore). Exact QA Bistro showing seeded demo menu (Mains / Drinks) verified in the browser.
+- `/restaurant/menu/categories` — create, rename, reorder (accessible move-up/move-down buttons, persisted via `sort_order`), activate/deactivate, archive/restore. Deactivating a category hides its items from the public menu without deleting them.
+- `/restaurant/menu/items/new` + `/restaurant/menu/items/[id]/edit` — full item form (name, category dropdown, price in integer TZS, availability, image upload/replace). Rejects invalid price at both Zod and DB layers.
+- Dashboard gains a subscription strip already shipped in Phase 5; the menu links are wired into the workspace sidebar ("Menu" section), the settings overview grid, the onboarding checklist, and dashboard quick actions.
+
+**Public anonymous route**
+
+- `/menu/[restaurantSlug]` — server-rendered via a narrow security-definer RPC `get_public_menu(slug)` that:
+  - returns only restaurants with `application_status='approved'` AND `operational_status='active'` — anything else maps to 404 (no existence hint, no data leak);
+  - returns only published categories/items (`is_active`, non-null `archived_at` excluded);
+  - respects `is_available` for items (Mandazi renders unavailable in the public menu);
+- The public layout renders real seeded data (QA Bistro: Pilau, Mandazi, Chai ya Maziwa verified in SSR output) with zero auth/client JS required.
+
+**Images**
+
+- Reusable pattern of Phase 4 (signed-URL + bucket-tagged folder `<restaurant_id>/<uuid>-<slug>.<ext>`) — new `menu-images` bucket (PNG/JPEG/WebP/AVIF, 2 MB, public read, restaurant-admin-only write scoped to `name like '<restaurant_id>/%'`). Anonymous visitors read images only if the item is published.
+
+**Archive semantics (all references preserved)**
+
+- `menu_categories` / `menu_items` gain `archived_at` (nullable) — archived rows are hidden from the public menu AND from the workspace list by default, restorable, and never satisfy a hard-delete.
+- Grants: `authenticated` lost `DELETE` on both tables; only `service_role` can delete (operational resets).
+
+### 16.2 Migrations applied
+
+```
+20261112160000_menu_management.sql
+   + archived_at columns on menu_categories / menu_items + partial live indexes
+   + revoke DELETE on menu_* from authenticated; grant update (archived_at)
+   + public RLS policies and is_category_public() tightened for archived rows
+   + get_public_menu(p_slug text) — anonymous-safe published-only surface
+   + menu-images storage bucket + RLS (public read, restaurant-admin write)
+```
+
+Applied only to mezo-staging (`supabase migration list --remote` confirms 18/18). PGlite validates the same chain after test-shimming of `storage.*` tables.
+
+### 16.3 Test reconciliation (accurate, not estimated)
+
+The convention used throughout: **one `it(...)`/expanded `it.each` case = one test case**; vitest reports expanded cases. Numbers (authoritative; no tests were edited recently, the suite simply grew):
+
+- **Unit — 126 cases across 8 files** (`tests/unit/*.test.ts`, e.g. `menu-validation.test.ts` 22 raw declarations plus expanded `it.each` cases). Authoritative run: `npx vitest run tests/unit --pool=forks` → `Test Files 8 passed (8)`, `Tests 126 passed (126)` (12:45 UTC today).
+- **PGlite — 113 cases** (`tests/db/database.test.ts` → `tests/db/shared-suite.ts`). Authoritative: last full green 14:09 UTC. See machine-memory limitation below.
+- **Staging — 113 cases** (`tests/db/staging.test.ts` → identical shared suite, hosted). `npm run test:db:staging` → 113 passed.
+- **`npm test` — 239 cases** = 126 unit + 113 PGlite. It does not include the staging run.
+- Adding all three commands together: 126 + 113 + 113 = **352 executions of the 239 unique test cases** (staging runs the same 113 as PGlite).
+
+- The Phase 5 table had said "193 total": actually **193 = 100 unit + 93 db (last pre-Phase-6 green)**. After Phase 6: **239 = 126 + 113**.
+- `expire_overdue_subscriptions()` is manual — not called by any cron — and must be triggered by an operator; automatic billing enforcement is therefore not automatic in this phase.
+- Machine limit cleared: after the 2026-11-13 harness restart (FreeVirtualMemory restored), `npm test` reported **239/239** (13:06) and `npm run test:db` reported **113/113** (13:08) with no source changes. If the OOM recurs, close heavy applications and re-run.
+- `expire_overdue_subscriptions()` is manual — not called by any cron — and must be triggered by an operator; automatic billing enforcement is therefore not automatic in this phase.
+
+### 16.4 Tenant isolation — assertions enforced
+
+- `adminA` cannot read/update/archive `restaurantB` categories or items (0 rows, RLS filtered or 42501).
+- `waiterA`/`kitchenA` cannot insert/update/delete/archive menu rows (42501).
+- `anon` cannot read unpublished or archived categories/items anywhere (`RLS` returns 0 rows).
+- Direct `DELETE FROM menu_*` as any client role fails (grant + RLS).
+- Categories of B1 hidden category `Hidden` invisible to anon (already covered).
+- `get_public_menu('tiny-diner')` never returns rows from other restaurants.
+- `menu-images` bucket only accepts writes via signed URLs into `<restaurant_id>/`; REST direct `insert into storage.objects` from non-admins fails.
+- Restaurants with `application_status != 'approved'` never surface their menu (RLS + RPC both enforce).
+
+### 16.5 Routes
+
+| Route                              | Purpose                                           | Access                  |
+| ---------------------------------- | ------------------------------------------------- | ----------------------- |
+| `/restaurant/menu`                 | overview + counts, list all items (search/filter) | `restaurant_admin` only |
+| `/restaurant/menu/categories`      | category CRUD / reorder / archive / restore       | `restaurant_admin` only |
+| `/restaurant/menu/items/new`       | add item                                          | `restaurant_admin` only |
+| `/restaurant/menu/items/[id]/edit` | edit item, availability, image                    | `restaurant_admin` only |
+| `/menu/[restaurantSlug]`           | anonymous public menu                             | anyone                  |
+
+### 16.6 Verification results
+
+| Check                           | Result                                                                                                                                                                                                                                                                                                         |
+| ------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `npm run lint`                  | Pass (exit 0) — re-verified 2026-11-13                                                                                                                                                                                                                                                                         |
+| `npm run typecheck`             | Pass (exit 0) — re-verified 2026-11-13                                                                                                                                                                                                                                                                         |
+| `npm run format:check`          | Pass (exit 0) — re-verified 2026-11-13                                                                                                                                                                                                                                                                         |
+| `npm test`                      | Pass — **239/239** (126 unit + 113 PGlite); `Test Files 9 passed \| 1 skipped (10)` — the skipped file is `staging.test.ts` by design (`describe.skip` unless `MEZO_DB_TEST_TARGET=staging`); exit 0, 2026-11-13 13:06                                                                                         |
+| `npm run test:db`               | Pass — **113/113** PGlite; exit 0, 2026-11-13 13:08                                                                                                                                                                                                                                                            |
+| `npm run test:db:staging`       | Pass — **113/113**; exit 0, 2026-11-13 (490 s hosted run; 14:02/14:09 runs also green)                                                                                                                                                                                                                         |
+| `npm run build`                 | Pass (exit 0) — clean `.next` regenerated 2026-11-13; Turbopack compile 7.4 s; TypeScript 5.9 s; 28 routes incl. `/menu/[restaurantSlug]`                                                                                                                                                                      |
+| `npm audit --omit=dev`          | Pass (exit 0) — 0 vulnerabilities                                                                                                                                                                                                                                                                              |
+| Public menu HTTP                | SSR 200 with real items incl. replaced image (`qa-bistro`); unknown slug 404                                                                                                                                                                                                                                   |
+| Browser UI (in-app, 2026-11-13) | Full flow as qa-admin: sign in → create item via `/restaurant/menu/items/new` → "Item created." banner → item appears in `/restaurant/menu` → **persists after reload** → edit (price 6500→7000, description) → "Item saved." → **persists after reload**; 0 console errors; archived after verification       |
+| Browser image upload (UI)       | UI-driven upload via file input (PNG built via canvas) → "Image updated." → `<img>` serves signed-URL object; **replacement** via UI likewise → public SSR serves **v2** image, v1 absent; v1 object deleted as orphan via service role                                                                        |
+| Item image upload (staging)     | Admin signed upload URL → uploaded PNG → public URL visible on public menu; replacement verified; public HEAD 200 image/png                                                                                                                                                                                    |
+| Cross-tenant storage write      | Admin of A cannot sign upload URL into B's folder (`new row violates row-level security policy`)                                                                                                                                                                                                               |
+| Storage limits                  | >2 MB payload rejected by bucket `file_size_limit`; `image/svg+xml` rejected by `allowed_mime_types`                                                                                                                                                                                                           |
+| Anonymous writes                | Anonymous sign-in refused: `new row violates row-level security policy`                                                                                                                                                                                                                                        |
+| Orphaned image                  | Pre-replacement QA upload **deleted** 2026-11-13 via service role (unreferenced); referenced replacement image kept                                                                                                                                                                                            |
+| Item creation (staging)         | Real item created via authenticated boundary and **via the UI** (`Browser QA Plate …`, id `1c72b883-…`) → visible in `get_public_menu` and `/restaurant/menu` → invalid inserts rejected (Postgres 23514) → soft-archived via UI after verification (hidden from the public menu); evidence kept in this table |
+| Production server uptime        | 2026-11-13 after harness restart the machine had ample memory; clean build + `npm start` on port 3100 verified serving; earlier in the day the same machine had died silently (OOM-class) and is the reason HTTP checks were split across two sessions                                                         |
+
+### 16.7 Known limitations
+
+1. **Images of seeded items** — QA item `Pilau ya Nyama` now carries a replaced image URL (`menu-images` public URL, HEAD 200); `Ndizi` and the other seeded items are still intentionally blank (storage not yet populated for them).
+2. **Orphaned images** — pre-replacement QA uploads deleted 2026-11-13 via service role after verification; the referenced images on `Pilau ya Nyama` (v-replace) and the archived `Browser QA Plate` item are kept.
+3. **Browser hydration** — resolved as an environment issue: with memory pressure gone, the in-app browser renders and hydrates all routes; the full qa-admin journey (login → item create → edit → image upload/replace) ran with 0 console errors. Earlier “items/new never hydrates” reports were the same OOM-class failure affecting every route.
+   3a. **Earlier machine exhaustion** (FreeVirtualMemory ≈ 0.5 GB) blocked `next build`'s TS worker and PGlite's WASM; resolved by the harness restart on 2026-11-13. If it recurs, reboot or close heavy apps, then re-run §16.6.
+   3b. The staging `describe.skip` in `tests/db/staging.test.ts` is by design; hosted runs require `MEZO_DB_TEST_TARGET=staging`.
+4. **Public menu is a preview** — ordering/cart/checkout are Phase 7.
+5. **No QR codes yet**; Route names may change in Phase 7.
+6. **`menu-images` is public-read** (explicit requirement for menu images). Private item images must not carry PII.
+7. `get_public_menu` returns `is_available` so unavailable items render with a disabled label; the public menu still shows them (documented behaviour).
+8. Performance: public menu SSR does one extra round trip for the restaurant row before the RPC. Fine at small size; could be merged into the RPC later.
+9. Search uses `ilike` with trimmed input; no full-text index yet (not required at restaurant-menu scale).
+
+## 17. Recommended next phase (after approval)
+
+**Phase 7 — QR ordering / customer ordering flow.** Do not start until Phase 6 is explicitly approved.

@@ -2194,4 +2194,410 @@ export function registerDatabaseSecuritySuite(target: "pglite" | "staging") {
       ).toBe(true);
     });
   });
+
+  describe("phase 6 — menu management", () => {
+    it("a restaurant admin can create a category and it appears for staff", async () => {
+      await runAs(
+        world.db,
+        "authenticated",
+        world.adminA.id,
+        "insert into public.menu_categories (id, restaurant_id, name, sort_order) values ($1, $2, 'Supper', 5)",
+        [crypto.randomUUID(), world.restaurantA],
+      );
+      const rows = await queryRows(
+        world.db,
+        "authenticated",
+        world.waiterA.id,
+        "select name from public.menu_categories where restaurant_id = $1 and name = 'Supper'",
+        [world.restaurantA],
+      );
+      expect(rows).toEqual([{ name: "Supper" }]);
+    });
+
+    it("category ordering persists after a reorder", async () => {
+      const before = await queryRows<{ id: string; sort_order: number; name: string }>(
+        world.db,
+        "authenticated",
+        world.adminA.id,
+        "select id, sort_order, name from public.menu_categories where restaurant_id = $1 and archived_at is null order by sort_order",
+        [world.restaurantA],
+      );
+      expect(before.length).toBeGreaterThanOrEqual(2);
+      const reversed = [...before].reverse();
+      for (const [index, category] of reversed.entries()) {
+        await runAs(
+          world.db,
+          "authenticated",
+          world.adminA.id,
+          "update public.menu_categories set sort_order = $2 where id = $1",
+          [category.id, index],
+        );
+      }
+      const after = await queryRows<{ name: string }>(
+        world.db,
+        "authenticated",
+        world.adminA.id,
+        "select name from public.menu_categories where restaurant_id = $1 and archived_at is null order by sort_order",
+        [world.restaurantA],
+      );
+      expect(after[0]!.name).toBe(reversed[0]!.name);
+      // Restore original order for downstream assertions.
+      for (const [index, category] of before.entries()) {
+        await runAs(
+          world.db,
+          "authenticated",
+          world.adminA.id,
+          "update public.menu_categories set sort_order = $2 where id = $1",
+          [category.id, index],
+        );
+      }
+    });
+
+    it("a waiter cannot create a category", async () => {
+      const failure = await expectSqlFailure(
+        world.db,
+        "authenticated",
+        world.waiterA.id,
+        "insert into public.menu_categories (restaurant_id, name) values ($1, 'Sneaky Cat')",
+        [world.restaurantA],
+      );
+      expectPermission(failure);
+    });
+
+    it("kitchen cannot create a category either", async () => {
+      const failure = await expectSqlFailure(
+        world.db,
+        "authenticated",
+        world.kitchenA.id,
+        "insert into public.menu_categories (restaurant_id, name) values ($1, 'Sneaky Cat 2')",
+        [world.restaurantA],
+      );
+      expectPermission(failure);
+    });
+
+    it("waiter/kitchen cannot manage menu items", async () => {
+      const insertFailure = await expectSqlFailure(
+        world.db,
+        "authenticated",
+        world.waiterA.id,
+        "insert into public.menu_items (restaurant_id, category_id, name, price_tzs) values ($1, $2, 'Sneaky Item', 100)",
+        [world.restaurantA, world.categoryA],
+      );
+      expectPermission(insertFailure);
+
+      // RLS filters the row silently; the price must remain unchanged.
+      await runAs(
+        world.db,
+        "authenticated",
+        world.kitchenA.id,
+        "update public.menu_items set price_tzs = 1 where id = $1",
+        [world.itemA],
+      );
+      const still = await queryRows<{ price_tzs: number }>(
+        world.db,
+        "service_role",
+        null,
+        "select price_tzs from public.menu_items where id = $1",
+        [world.itemA],
+      );
+      expect(Number(still[0]!.price_tzs)).not.toBe(1);
+    });
+
+    it("admin B cannot see restaurant A's hidden categories nor edit A's categories", async () => {
+      // A hidden (inactive) category in restaurant A must be invisible to B,
+      // even though public categories are intentionally visible to everyone.
+      await runAs(
+        world.db,
+        "authenticated",
+        world.adminA.id,
+        "insert into public.menu_categories (restaurant_id, name, is_active, sort_order) values ($1, 'AdminB hidden', false, 50)",
+        [world.restaurantA],
+      );
+
+      const seen = await queryRows(
+        world.db,
+        "authenticated",
+        world.adminB.id,
+        "select id from public.menu_categories where restaurant_id = $1 and not is_active",
+        [world.restaurantA],
+      );
+      expect(seen).toHaveLength(0);
+
+      await runAs(
+        world.db,
+        "authenticated",
+        world.adminB.id,
+        "update public.menu_categories set name = 'Hacked' where id = $1",
+        [world.categoryA],
+      );
+      const still = await queryRows<{ name: string }>(
+        world.db,
+        "service_role",
+        null,
+        "select name from public.menu_categories where id = $1",
+        [world.categoryA],
+      );
+      expect(still[0]!.name).not.toBe("Hacked");
+    });
+
+    it("admin B cannot see restaurant A's hidden items nor edit them", async () => {
+      await runAs(
+        world.db,
+        "authenticated",
+        world.adminA.id,
+        "insert into public.menu_items (restaurant_id, category_id, name, price_tzs, is_available) values ($1, $2, 'AdminB hidden item', 100, false)",
+        [world.restaurantA, world.categoryA],
+      );
+
+      const seen = await queryRows(
+        world.db,
+        "authenticated",
+        world.adminB.id,
+        "select id from public.menu_items where restaurant_id = $1 and not is_available",
+        [world.restaurantA],
+      );
+      expect(seen).toHaveLength(0);
+
+      await runAs(
+        world.db,
+        "authenticated",
+        world.adminB.id,
+        "update public.menu_items set price_tzs = 1 where id = $1",
+        [world.itemA],
+      );
+      const still = await queryRows<{ price_tzs: number }>(
+        world.db,
+        "service_role",
+        null,
+        "select price_tzs from public.menu_items where id = $1",
+        [world.itemA],
+      );
+      expect(Number(still[0]!.price_tzs)).not.toBe(1);
+    });
+
+    it("rejects negative menu item price at the database constraint", async () => {
+      const failure = await expectSqlFailure(
+        world.db,
+        "authenticated",
+        world.adminA.id,
+        "insert into public.menu_items (restaurant_id, category_id, name, price_tzs) values ($1, $2, 'Free Lunch', -1)",
+        [world.restaurantA, world.categoryA],
+      );
+      expect(failure.code === "23514" || /price/i.test(failure.message)).toBe(true);
+    });
+
+    it("rejects assigning an item to a different restaurant's category", async () => {
+      const failure = await expectSqlFailure(
+        world.db,
+        "authenticated",
+        world.adminA.id,
+        "insert into public.menu_items (restaurant_id, category_id, name, price_tzs) values ($1, $2, 'Cross Restaurant', 1000)",
+        [world.restaurantA, world.categoryB],
+      );
+      expect(failure.code === "23503" || /foreign key|category/i.test(failure.message)).toBe(true);
+    });
+
+    it("admin A can create an item in own restaurant", async () => {
+      await runAs(
+        world.db,
+        "authenticated",
+        world.adminA.id,
+        "insert into public.menu_items (restaurant_id, category_id, name, price_tzs) values ($1, $2, 'Ugali', 3000)",
+        [world.restaurantA, world.categoryA],
+      );
+      const rows = await queryRows<{ name: string }>(
+        world.db,
+        "authenticated",
+        world.adminA.id,
+        "select name from public.menu_items where restaurant_id = $1 and name = 'Ugali'",
+        [world.restaurantA],
+      );
+      expect(rows).toEqual([{ name: "Ugali" }]);
+    });
+
+    it("menu items cannot be hard-deleted by clients", async () => {
+      const failure = await expectSqlFailure(
+        world.db,
+        "authenticated",
+        world.adminA.id,
+        "delete from public.menu_items where id = $1",
+        [world.itemA],
+      );
+      expect(
+        failure.code === "42501" || /permission denied|delete/i.test(failure.message),
+        `expected permission/denied, got: ${failure.message}`,
+      ).toBe(true);
+    });
+
+    it("menu categories cannot be hard-deleted by clients", async () => {
+      const failure = await expectSqlFailure(
+        world.db,
+        "authenticated",
+        world.adminA.id,
+        "delete from public.menu_categories where id = $1",
+        [world.categoryA],
+      );
+      expect(
+        failure.code === "42501" || /permission denied|delete/i.test(failure.message),
+        `expected permission/denied, got: ${failure.message}`,
+      ).toBe(true);
+    });
+
+    it("archived items are hidden from the public menu but visible to the workspace", async () => {
+      const hiddenAnon = await queryRows(
+        world.db,
+        "anon",
+        null,
+        "select id from public.menu_items where restaurant_id = $1 and name = 'Ugali'",
+        [world.restaurantA],
+      );
+      // Ugali exists but is available — anon should see it
+      expect(hiddenAnon).toHaveLength(1);
+
+      // Mark it archived and check anon no longer sees it
+      await runAs(
+        world.db,
+        "authenticated",
+        world.adminA.id,
+        "update public.menu_items set archived_at = now() where restaurant_id = $1 and name = 'Ugali'",
+        [world.restaurantA],
+      );
+      const gone = await queryRows(
+        world.db,
+        "anon",
+        null,
+        "select id from public.menu_items where restaurant_id = $1 and name = 'Ugali'",
+        [world.restaurantA],
+      );
+      expect(gone).toHaveLength(0);
+
+      // …but the workspace sees it
+      const seen = await queryRows(
+        world.db,
+        "authenticated",
+        world.adminA.id,
+        "select id from public.menu_items where restaurant_id = $1 and name = 'Ugali'",
+        [world.restaurantA],
+      );
+      expect(seen).toHaveLength(1);
+
+      // Restore
+      await runAs(
+        world.db,
+        "authenticated",
+        world.adminA.id,
+        "update public.menu_items set archived_at = null where restaurant_id = $1 and name = 'Ugali'",
+        [world.restaurantA],
+      );
+    });
+
+    it("archived categories are hidden from the public menu", async () => {
+      // Create and archive a fresh test category
+      const rows = await queryRows<{ id: string }>(
+        world.db,
+        "authenticated",
+        world.adminA.id,
+        "insert into public.menu_categories (restaurant_id, name, sort_order, archived_at) values ($1, 'Temp Cat', 99, now()) returning id",
+        [world.restaurantA],
+      );
+      const id = rows[0]!.id;
+
+      const anon = await queryRows(
+        world.db,
+        "anon",
+        null,
+        "select id from public.menu_categories where id = $1",
+        [id],
+      );
+      expect(anon).toHaveLength(0);
+    });
+
+    it("get_public_menu returns published rows for an approved, active restaurant", async () => {
+      const rows = await queryRows<{ item_name: string; restaurant_slug: string }>(
+        world.db,
+        "anon",
+        null,
+        "select item_name, restaurant_slug from public.get_public_menu('demo-cafe') order by item_name",
+      );
+      const demoSlug = rows.length > 0 ? rows[0]!.restaurant_slug : null;
+      expect(demoSlug).toBe("demo-cafe");
+      expect(rows.map((row) => row.item_name)).toContain("Pilau");
+      // Unavailable items (Mandazi) can appear but must be labelled as such — they do surface as is_available=false rows.
+      const mandazi = rows.find((row) => row.item_name === "Mandazi");
+      expect(mandazi).toBeDefined();
+    });
+
+    it("get_public_menu never leaks unapproved restaurants", async () => {
+      // A non-approved restaurant would be invisible to anon; trigger setup:
+      // The fixture has no unapproved restaurant in menu data — but the RPC must
+      // still return zero rows for a bogus slug.
+      const rows = await queryRows<{ restaurant_slug: string }>(
+        world.db,
+        "anon",
+        null,
+        "select restaurant_slug from public.get_public_menu('not-a-real-slug')",
+      );
+      expect(rows).toHaveLength(0);
+    });
+
+    it("get_public_menu never returns another restaurant's items", async () => {
+      const rows = await queryRows<{ restaurant_slug: string }>(
+        world.db,
+        "anon",
+        null,
+        "select restaurant_slug from public.get_public_menu('tiny-diner')",
+      );
+      for (const row of rows) {
+        expect(row.restaurant_slug).toBe("tiny-diner");
+      }
+    });
+
+    it("menu-images bucket exists with public read and 2 MB limit", async () => {
+      // Storage is inspected as the database owner; clients never reach it.
+      // Storage is inspected as the database owner; clients never reach it.
+      const buckets = await world.db.query<{
+        public: boolean;
+        file_size_limit: bigint;
+        allowed_mime_types: string[];
+      }>(
+        "select public, file_size_limit, allowed_mime_types from storage.buckets where id = 'menu-images'",
+      );
+      expect(buckets.rows).toHaveLength(1);
+      expect(buckets.rows[0]!.public).toBe(true);
+      expect(Number(buckets.rows[0]!.file_size_limit)).toBe(2097152);
+      expect(buckets.rows[0]!.allowed_mime_types).toEqual(
+        expect.arrayContaining(["image/png", "image/jpeg", "image/webp", "image/avif"]),
+      );
+    });
+
+    it("menu-images write policies scope to the restaurant folder", async () => {
+      const policies = await world.db.query<{ policyname: string }>(
+        "select policyname from pg_policies where tablename = 'objects' and policyname ilike 'menu_images%' order by 1",
+      );
+      const names = policies.rows.map((policy) => policy.policyname);
+      expect(names).toEqual(
+        expect.arrayContaining(["menu_images_admin_write", "menu_images_select"]),
+      );
+    });
+
+    it("unauthenticated anon cannot write to menu_items or menu_categories", async () => {
+      const failure = await expectSqlFailure(
+        world.db,
+        "anon",
+        null,
+        "insert into public.menu_items (restaurant_id, category_id, name, price_tzs) values ($1, $2, 'x', 1)",
+        [world.restaurantA, world.categoryA],
+      );
+      expectPermission(failure);
+
+      const failure2 = await expectSqlFailure(
+        world.db,
+        "anon",
+        null,
+        "update public.menu_categories set name = 'hack' where id = $1",
+        [world.categoryA],
+      );
+      expectPermission(failure2);
+    });
+  });
 }

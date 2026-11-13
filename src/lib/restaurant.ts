@@ -219,7 +219,7 @@ export function toShellMemberships(memberships: readonly Membership[]) {
   }));
 }
 
-export type WorkspaceSearchParams = Promise<{ restaurant?: string }>;
+export type WorkspaceSearchParams = Promise<{ restaurant?: string }> | { restaurant?: string };
 
 /**
  * Guard + load for the admin workspace. Redirects unauthenticated users to
