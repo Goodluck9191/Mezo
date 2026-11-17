@@ -83,3 +83,24 @@
     scroll-behavior: auto !important;
   }
 }
+
+/* Print: only the QR sheet is printed. */
+@media print {
+  body * {
+    visibility: hidden;
+  }
+
+  .print-area,
+  .print-area * {
+    visibility: visible;
+  }
+
+  .print-area {
+    position: fixed;
+    inset: 0;
+    display: grid;
+    place-items: center;
+    padding: 2rem;
+    text-align: center;
+  }
+}

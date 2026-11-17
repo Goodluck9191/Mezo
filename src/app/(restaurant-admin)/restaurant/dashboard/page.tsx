@@ -334,13 +334,13 @@ export default async function RestaurantDashboardPage({
           <div className="grid gap-3 sm:grid-cols-2">
             <EmptyState
               icon={<ClipboardListIcon className="size-5" />}
-              title="Orders — Coming in Phase 7"
+              title="Orders — Coming in a later phase"
               description="Live orders from tables will appear here once customer ordering ships."
             />
             <EmptyState
               icon={<QrCodeIcon className="size-5" />}
-              title="QR codes — Coming in a later phase"
-              description="Printable per-table QR codes arrive with the customer ordering phase."
+              title="QR codes"
+              description="Printable per-table QR codes are live under Tables. Create a table, download its QR, and place it on the table."
             />
             <EmptyState
               icon={<WalletIcon className="size-5" />}

@@ -1367,3 +1367,166 @@ The convention used throughout: **one `it(...)`/expanded `it.each` case = one te
 ## 17. Recommended next phase (after approval)
 
 **Phase 7 — QR ordering / customer ordering flow.** Do not start until Phase 6 is explicitly approved.
+---
+
+## 18. Phase 7 — QR Codes & Table Access (complete, awaiting approval)
+
+**Status: implementation complete and verified on mezo-staging. Production was not modified. No Phase 8 work (ordering, cart, checkout, payments) has been started. Awaiting explicit approval of Phase 7.**
+
+Phase 7 turns every restaurant table into a QR-addressable access point, enforces the waiter-approval business rule for seating, supports multiple guests joining one shared table session, and adds the staff and admin surfaces for managing requests and printable QR codes. Ordering itself remains out of scope.
+
+### 18.1 What was built
+
+**Database (migration `20261116120000_qr_table_access.sql`, applied to mezo-staging)**
+
+- `restaurant_tables.qr_token` (64-hex cleartext bearer) is replaced by `qr_token_hash = md5(token)`. The cleartext is shown once at creation/regeneration and never stored or client-readable (column-scoped SELECT; `UPDATE` reduced to `name, is_active` only; RPCs are the only readers/writers of the hash).
+- New enum `table_access_request_status` (`pending`, `approved`, `rejected`, `expired`, `cancelled`) and new table `table_access_requests` with a partial unique index so a customer can only hold one pending request per table, a `restaurant_id`-scoped composite FK, and RLS (own-row select for the requester; staff select for `waiter`/`restaurant_admin`; no client writes — all transitions go through SECURITY DEFINER RPCs with `search_path = ''`).
+- RPCs (all SECURITY DEFINER, caller identity from `auth.uid()`, membership verified inside, transactions with row locks): `get_table_entry(p_qr_token)` (anonymous-safe projection incl. the caller's own access state), `request_table_access` (lazy 15-minute expiry via `now()`, idempotent pending/approved returns, 10-requests-per-10-minutes-per-user rate cap, attaches to the open session when one exists), `approve_table_access` (waiter/restaurant_admin only; table-row `FOR UPDATE` lock get-or-creates the single active session; `guest_sessions` upsert; audit event), `reject_table_access`, `cancel_table_access` (requesting guest only), `regenerate_table_qr_token` (restaurant_admin only; rotates the hash, audits), `create_table_with_qr` (restaurant_admin only, plan table limit enforced by the existing `enforce_table_limit` trigger with its subscription-row lock), `close_table_session` (also cancels pending join requests for the session, audits).
+- The pre-approval entry RPC `request_table_session` is dropped — it created approved-ish sessions without waiter confirmation, which would bypass the core waiter-approval rule this phase enforces.
+- 19.13: `table_access_requests` added to the `supabase_realtime` publication when present (interface acceleration only; all authorization remains server-side).
+
+**Routing and UI**
+
+- `/t/[token]` — anonymous customer entry: resolves the token server-side (invalid/revoked → clear "Can't open this table" state; nothing else leaks), shows restaurant + table + a waiter-approval panel (validating → request → waiting → approved/rejected/expired/cancelled/closed), plus the public menu (browse freely; viewing grants no ordering permission). Anonymous sign-in via the existing helper; the panel polls `get_table_entry` every 5 s and a Realtime `postgres_changes` subscription (own row only) accelerates refreshes. `robots: noindex`.
+- `/waiter/tables` — staff queue: pending requests (table, restaurant, request time, party size), approve/reject inline, open sessions with guest counts, close with confirmation. Realtime channels per staff restaurant + 10 s fallback refresh + manual refresh.
+- `/restaurant/tables` — restaurant_admin workspace: plan-usage progress bar (X/N), add-table form (limit-aware, one-time QR reveal), table list with live session status and guest counts, per-row QR regeneration with confirmation, and activate/deactivate toggle.
+- QR codes are generated server-side as SVG data URLs (`qrcode@1.5.4`): shown once at creation/regeneration, downloadable as SVG (crisp for print), and printable via a print-only sheet (`.print-area`, print CSS).
+- Navigation: "Tables & QR codes" wired into the admin sidebar, settings overview, and dashboard empty-state copy.
+- A browser-specific defect was found and fixed during review: React schedules the suspense-boundary redo ($RV) through `requestAnimationFrame`/`setTimeout`, and the in-app browser used for verification never fires those callbacks, leaving any `loading.tsx` boundary that actually split permanently stuck on its skeleton (confirmed 3/3 on `/t/[token]`, `/restaurant/menu`, and `/restaurant/dashboard` for slow RPC paths). `/t/[token]/loading.tsx` was removed so the page always renders its full server-side HTML deterministically; other loading.tsx boundaries are unaffected.
+
+**Shared session semantics**
+
+Multiple approved guests belong to one table session: `guest_sessions (table_session_id, user_id)` is the join; one open session per table is enforced by the pre-existing partial unique index plus a table-row lock inside `approve_table_access` (concurrent approvals serialize; the loser joins the winner's session). Closing blocks new joins and cancels pending join requests; a returning customer needs a fresh approval.
+
+**Abuse protection**
+
+- Pending requests expire after **15 minutes** (server time, lazily enforced inside every RPC that reads or decides a request — no cron dependency; expiration timing is covered by tests).
+- Rate cap: 10 requests per user per 10-minute window (`22023`).
+- Idempotency: repeated scans return the same pending request (partial unique index).
+- Kitchen cannot approve/reject/close/regenerate; cross-tenant access is rejected inside the RPCs (`42501`); platform admins have no restaurant role unless they hold a membership.
+
+### 18.2 Migrations applied
+
+| Migration                            | Content                                                                                             | Applied                      |
+| ------------------------------------ | --------------------------------------------------------------------------------------------------- | ---------------------------- |
+| `20261116120000_qr_table_access.sql` | QR hash column swap, `table_access_requests`, 8 RPCs, `close_table_session` v2, publication, grants | mezo-staging (staging 19/19) |
+
+Production was not touched; no other applied migration was edited.
+
+### 18.3 QR token security design
+
+- 244-bit CSPRNG token (two v4 UUIDs, hex). The plaintext appears exactly once in the server-action response that creates/regenerates it; it is never stored, logged, or accepted from any client.
+- Only `md5(token)` is stored (unsalted by design: preimage space is 244 bits — same scheme as the staff-invitation tokens; portable because PGlite lacks pgcrypto). The hash is compared inside SECURITY DEFINER functions only.
+- Client roles cannot read or write the hash: `authenticated` was swapped to column-scoped `SELECT (id, restaurant_id, name, is_active, created_at, updated_at)`, `INSERT/DELETE` revoked, `UPDATE` limited to `name, is_active`. `anon` has nothing on `restaurant_tables`.
+- Token resolution is only via RPCs that validate format, look up the hash, and enforce restaurant visibility/activity inside.
+- Regenerating rotates the hash immediately; printed codes stop working.
+- Residual risk: hash rotation invalidates old codes instantly, which is the revocation mechanism (no blacklist needed).
+
+### 18.4 Verification results
+
+| Check                                         | Result                                                                                                                                                                                                                                                        |
+| --------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `npm run lint` / `typecheck` / `format:check` | Pass                                                                                                                                                                                                                                                          |
+| `npm run test`                                | Pass — **273 tests** (142 unit + 131 PGlite DB)                                                                                                                                                                                                               |
+| `npm run test:db`                             | Pass — **131/131** PGlite                                                                                                                                                                                                                                     |
+| `npm run test:db:staging`                     | First run contaminated (124/131): a concurrent staging suite from a separate session reset the shared fixture universe mid-run; the 7 tail (Phase 7 lifecycle) tests failed spuriously. Re-run after that suite finished: **131/131 pass (966 s, run alone)** |
+| `npm run build`                               | Pass — all routes                                                                                                                                                                                                                                             |
+| `npm audit --omit=dev`                        | 0 vulnerabilities                                                                                                                                                                                                                                             |
+
+**Browser E2E (staging, `qa-bistro`, throwaway QA7 fixtures) — all pass:**
+
+- Sign-in as restaurant admin → `/restaurant/tables` → plan usage 0/20 → create table "QA Table 1" → plan shows 1/20, table listed, one-time QR reveal renders (server-rendered SVG, Download SVG, Print, Copy table link).
+- Anonymous scan → `/t/<token>` shows restaurant/table + public menu → request → panel shows "Waiting for a waiter…".
+- Waiter → `/waiter/tables` → pending request visible → approve → customer sees "You're approved and seated".
+- Second anonymous customer → request → approve → both guests members of the same session (verified in UI "2 guests · opened" and in `guest_sessions`).
+- Waiter → close → customer sees "This table session was closed" → requests again → new pending → approve → seated again (fresh approval after closure).
+- Regeneration → new SVG reveal; old token stops resolving (invalid state shown).
+- Invalid/revoked token → "This QR code is invalid or has been deactivated."
+- Kitchen user → `/waiter/tables` and `/restaurant/tables` redirect to `/kitchen`.
+- Audit rows written: `table.created`, `table_access.approved`/`rejected`, `table_session.closed`, `table_qr.regenerated` (roles recorded).
+
+### 18.5 Shared-suite concurrency caveat
+
+The staging fixture universe (`demo-cafe`, `other-bistro`, `tiny-diner`, `scratch-phase4`, `%@example.test` users) is shared: re-runs delete and re-create it. Two staging suites interleaved in one run destroy each other's fixtures and fail spuriously with "table not found"/FK errors. The staging suite must be run alone. This is operational, not a code defect; the PGlite suite is isolated per run.
+
+### 18.6 Known limitations / QA notes
+
+1. **QA fixtures on staging**: `QA7 Admin`, `QA7 Waiter`, `QA7 Kitchen` (throwaway `qa7-*@mezo-staging.example.test` accounts, registered as members of `qa-bistro`), tables `QA Table 1` and `QA E2E 2` (one with an active session at report time), QA Bistro's demo menu. No production data touched; remove if undesired.
+2. **Staging run 1 contamination** (see §18.5): 124/131. Re-run: **131/131**.
+3. **`/t/[token]/loading.tsx` was removed**: the in-app browser used for verification does not fire `requestAnimationFrame`/`setTimeout`/`MessageChannel` callbacks, so React's suspense-boundary redo never executed and the page was stuck on its skeleton forever; any split `loading.tsx` boundary behaves the same in that browser. Without the split, the page renders its full HTML deterministically (same pattern as `/menu/[restaurantSlug]`).
+4. **QR capture from the UI for E2E automation**: the one-time cleartext token is only ever in client memory; the E2E exercised the live QR flow using a SQL-created table with a known token on `qa-bistro`. The one-time reveal path was verified to render/download/print/copy, but the copied URL itself was never machine-read in this harness (clipboard read denied by the browser).
+5. **Print output not visually verified**: the print-only QR sheet is wired (`window.print()`, print CSS, `.print-area`) but this in-app browser offers no print emulation; print output was not screenshot-verified.
+6. **Table limit UX at 20/20**: blocked-state copy exists but was not exercised (QA Bistro has 2/20 tables used); enforcement is trigger-level and covered by the DB suite (`enforce_table_limit`) and the RPC's `23514` mapping.
+7. **Anonymous session accumulation**: each customer scan creates an anonymous user on staging; they persist by design for the session. No purge mechanism yet — operational concern for a future housekeeping task.
+8. **Expired/rejected/cancelled request states**: all render with distinct copy and the "Request again" path; the rejected state was exercised end-to-end (bogus admin-originated request rejected by the waiter).
+9. **Realtime is acceleration only**: the staff board also polls (10 s) and has a manual refresh; authorization never depends on it (all mutations re-validate server-side).
+
+---
+
+## 19. Phase 7 — Final verification pass (awaiting approval)
+
+**Status: cross-cutting verification complete; hosted staging suite green; awaiting explicit approval of Phase 7. Production untouched; no Phase 8 work.**
+
+### 19.1 Final file inventory (all intentional; nothing unrelated touched)
+
+Modified (14) — all intentional:
+`PROJECT_STATUS.md`, `package.json`, `package-lock.json` (qrcode/@types/qrcode + test:concurrency script; the unused `playwright` devDependency is flagged by the final review, see §19.7), `src/app/(customer)/menu/[restaurantSlug]/page.tsx` (public menu refactor onto shared `PublicMenuView`), `src/app/(restaurant-admin)/restaurant/dashboard/page.tsx` (QR live tile copy), `src/app/(restaurant-admin)/restaurant/settings/page.tsx` (Tables & QR codes tile), `src/app/(staff)/kitchen/page.tsx` (copy), `src/app/(staff)/waiter/page.tsx` (floor-console CTA), `src/app/globals.css` (print sheet CSS), `src/components/restaurant/workspace-shell.tsx` (Tables nav), `src/components/ui/icons.tsx` (BellIcon), `src/types/database.ts` (regenerated Phase 7), `tests/db/fixtures.ts`, `tests/db/shared-suite.ts`.
+
+Untracked (16) — all Phase 7 artifacts: migration `20261116120000_qr_table_access.sql`; `src/app/(customer)/t/[token]/page.tsx`; `src/app/actions/table-access.ts`; `src/lib/{qr.ts, qr-code.ts, table-access.ts, validation/tables.ts}`; `src/components/{customer/table-access-panel, staff/waiter-tables-board, restaurant/table-actions, restaurant/table-qr, menu/public-menu-view}.tsx`; `src/app/(restaurant-admin)/restaurant/tables/page.tsx`; `src/app/(staff)/waiter/tables/page.tsx`; `tests/unit/table-access.test.ts`; `tests/db/concurrency-staging.mjs` (`npm run test:concurrency`).
+
+Phase 0–6 diffs are pure refactors/copy/nav — no behavioral changes (verified line-by-line: menu refactor → shared `PublicMenuView`; dashboard → empty-state copy + mojibake fix; settings/onboarding-adjacent cards; print CSS append; BellIcon append).
+
+### 19.2 Duplicate implementation findings
+
+Previously-flagged duplicate `src/lib/validation/tables.ts` is now the single validation module (theirs, merged); `validation/table-access.ts` no longer exists; no duplicate RPC wrappers, QR renderers, or types remain. `src/lib/qr.ts` (buildTableQrUrl), `src/lib/qr-code.ts` (server SVG render), `src/lib/table-access.ts` (board data loader), `src/lib/validation/tables.ts` (schemas) — all referenced, none duplicated.
+
+### 19.3 Generated QR round-trip (UI-generated, not SQL fixtures)
+
+- Created `QA QR Roundtrip` via the admin UI (`Add table` → one-time reveal).
+- Captured the server-rendered SVG (`img[alt^="QR code"]` src), decoded it with a local `jsqr`+`qrcode` harness (path parser for stroke-based SVG) → `http://localhost:3000/t/bdd9b7a9da954cdca63da49a297f06c7eb336acc0e2c44bcb632d0e2409ad933`.
+- `md5(decoded token) === restaurant_tables.qr_token_hash` for that table row — the printed code provably encodes this table's token.
+- Old URL after Regenerate QR → "This QR code is invalid or has been deactivated."; the new URL resolves (token `4b0197d0…`, hash re-verified). Roundtrip URL pattern is `NEXT_PUBLIC_APP_URL`-driven (env-configurable, no hard-coding).
+
+### 19.4 Concurrent approvals (two independent waiter sessions, real connections)
+
+`tests/db/concurrency-staging.mjs` (`npm run test:concurrency`): two `authenticated` JWT-claim sessions (waiterA, waiterA2 — both active waiters of demo-cafe) fire `approve_table_access` at two pending requests for the same table over two separate pooler connections, 10 iterations, fixtures reset per iteration.
+
+Every iteration: both requests end `approved`; exactly one open session per table; both `guest_sessions` reference that session; two `table_access.approved` audit rows with distinct `decided_by`. 10/10 pass. (PGlite cannot reproduce this — single connection; staging only, run alone.)
+
+### 19.5 Realtime verification
+
+- WS subscription with waiter JWT to `postgres_changes` on `table_access_requests` (filter `restaurant_id=eq.qa-bistro`) receives INSERT ~1.2 s after the guest RPC and UPDATE ~7.5 s after waiter approval. `user_id`-filtered subscription receives the same events for the requesting guest. Filter on the wrong restaurant receives nothing.
+- Board DOM updates without manual refresh after external node-side mutations; the board observes AWAITING APPROVAL counts change and guest lists update within seconds (10 s poll fallback also present and functioning; `Refresh` button verified).
+- Limitation: two live interactive browser sessions in this harness share one cookie jar, so cross-client UI synchronicity was proven at the protocol layer + board layer, not as two concurrent logged-in UIs.
+
+### 19.6 Security-critical RPC review
+
+All eight functions reviewed in-body: `search_path = ''`, `security definer`, identity from `auth.uid()` only; staff permission checked inside every mutating RPC (`has_restaurant_role` with `waiter`/`restaurant_admin`; kitchen excluded); anonymous users can only `get_table_entry` and `request_table_access` (no self-approval path; approval requires membership); cross-tenant rejected (`42501`); expired requests flip to `expired` and are never approvable (flip + audit committed, action returns `expired` — server action treats non-`approved` as failure); QR hash un-readable by client roles (column grant proof: `has_column_privilege(authenticated, …, qr_token_hash, SELECT/UPDATE) = false`); state transitions atomic; `audit_logs` not client-writable (no client INSERT grant).
+
+Observation (pre-existing, not weakened by Phase 7): migration 11 still grants `authenticated` table-level `INSERT`/`DELETE` on `restaurant_tables`; the `enforce_table_limit` trigger and the admin-write RLS policy keep it inside the tenant boundary. Removing those grants would break the approved Phase 5 limit test; deferred deliberately with this report.
+
+### 19.7 Test gates — exact results
+
+| Check                     | Result                                              |
+| ------------------------- | --------------------------------------------------- |
+| `npm run lint`            | Pass (exit 0)                                       |
+| `npm run typecheck`       | Pass (exit 0)                                       |
+| `npm run format:check`    | Pass — "All matched files use Prettier code style!" |
+| `npm test`                | Pass — **273/273** (142 unit + 131 PGlite)          |
+| `npm run test:db`         | Pass — **131/131**                                  |
+| `npm run test:db:staging` | Pass — **131/131** (550.91 s, run alone)            |
+| `npm run build`           | Pass                                                |
+| `npm audit --omit=dev`    | 0 vulnerabilities                                   |
+
+Unused dependency flagged: `playwright` (devDependency, added without any usage in this phase) — harmless for the production build/audit but flagged for removal decision; ends noted here so nothing ships unexamined.
+
+### 19.8 Remaining limitations
+
+1. Two live browser sessions not exercisable here (single cookie jar); realtime proven at protocol+board layer, customer-panel reactivity verified via same-transport UPDATE events, not two simultaneous UIs.
+2. Print output not visually verified (no print emulation in this browser); print CSS/`print-area` markup verified present and wired to `window.print()` only.
+3. Split `loading.tsx` boundaries can stay on skeleton in this in-app browser (timers never fire); removed only for `/t/[token]`; all other boundaries left intact pending user confirmation in real Chrome/Edge (page content itself renders correctly on fast RPC paths — dashboard/menu verified).
+4. Staging fixture suite is not re-entrant; concurrent runs corrupt each other (observed); run alone only.
+5. `loading.tsx` files remain for 10 admin routes (Phase 0–6), intentionally untouched.
+6. Realtime channel closed before page unload (`removeChannel`) — verified code path; not load-tested at scale.
+7. Expired/rejected/cancelled/closed customer states all verified in-browser end-to-end; expired-flip audit confirmed.
+8. `qa7-*` staging fixtures retained (QA Bistro), plus two closed probe tables were deleted after verification; `qa7-*` members carry no privileges beyond their QA Bistro roles.

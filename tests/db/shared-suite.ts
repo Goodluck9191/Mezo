@@ -9,7 +9,7 @@
  */
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
-import { expectSqlFailure, queryRows, runAs } from "./harness";
+import { createUser, expectSqlFailure, makeIdentity, queryRows, runAs } from "./harness";
 import { buildWorld, type World } from "./fixtures";
 
 /**
@@ -118,24 +118,28 @@ export function registerDatabaseSecuritySuite(target: "pglite" | "staging") {
       expect(rows).toHaveLength(1);
     });
 
-    it("generates 64-hex random QR tokens, never sequential ids", async () => {
-      const tokens = await queryRows<{ qr_token: string }>(
+    it("stores only a 32-hex md5 hash of the QR token, never the cleartext", async () => {
+      const tables = await queryRows<{ qr_token_hash: string }>(
         world.db,
         "service_role",
         null,
-        "select qr_token from public.restaurant_tables",
+        "select qr_token_hash from public.restaurant_tables",
       );
-      const seen = new Set(tokens.map((t) => t.qr_token));
-      expect(seen.size).toBe(tokens.length);
-      for (const token of seen) expect(token).toMatch(/^[0-9a-f]{64}$/);
+      const seen = new Set(tables.map((t) => t.qr_token_hash));
+      expect(seen.size).toBe(tables.length);
+      for (const token of seen) expect(token).toMatch(/^[0-9a-f]{32}$/);
+      // The cleartext fixture tokens must not appear anywhere in storage.
+      for (const cleartext of [world.qrA1, world.qrA2, world.qrB1]) {
+        expect(seen.has(cleartext)).toBe(false);
+      }
     });
 
-    it("rejects an invalid QR token format and duplicate tokens", async () => {
+    it("rejects an invalid QR token hash format and duplicate hashes", async () => {
       const invalid = await expectSqlFailure(
         world.db,
         "service_role",
         null,
-        "insert into public.restaurant_tables (restaurant_id, name, qr_token) values ($1, 'X', 'abc')",
+        "insert into public.restaurant_tables (restaurant_id, name, qr_token_hash) values ($1, 'X', 'abc')",
         [world.restaurantA],
       );
       expect(invalid.message).toMatch(/check/i);
@@ -144,10 +148,32 @@ export function registerDatabaseSecuritySuite(target: "pglite" | "staging") {
         world.db,
         "service_role",
         null,
-        "insert into public.restaurant_tables (restaurant_id, name, qr_token) values ($1, 'Y', $2)",
+        "insert into public.restaurant_tables (restaurant_id, name, qr_token_hash) values ($1, 'Y', md5($2))",
         [world.restaurantA, world.qrA1],
       );
       expect(first.message).toMatch(/unique/i);
+    });
+
+    it("does not expose the QR token hash to client roles", async () => {
+      const hashColumn = await expectSqlFailure(
+        world.db,
+        "authenticated",
+        world.adminA.id,
+        "select qr_token_hash from public.restaurant_tables",
+        [],
+      );
+      // Column-level SELECT is revoked from authenticated; staff read only the
+      // operational columns.
+      expect(hashColumn.message).toMatch(/permission denied|column/i);
+
+      const anonRows = await expectSqlFailure(
+        world.db,
+        "anon",
+        null,
+        "select id from public.restaurant_tables",
+        [],
+      );
+      expect(anonRows.message).toMatch(/permission denied|relation/i);
     });
 
     it("enforces the Starter plan table limit (5 tables)", async () => {
@@ -420,29 +446,208 @@ export function registerDatabaseSecuritySuite(target: "pglite" | "staging") {
     let sessionId: string;
     let guestSessionId: string;
     let orderId: string;
+    let guest1RequestId: string;
+    let guest2RequestId: string;
 
     it("rejects an unknown QR token", async () => {
       const failure = await expectSqlFailure(
         world.db,
         "authenticated",
         world.guest1.id,
-        "select * from public.request_table_session($1, 2)",
+        "select * from public.request_table_access($1, 2)",
         ["deadbeef".repeat(8)],
       );
       expect(failure.message).toMatch(/invalid table code/i);
     });
 
-    it("creates a pending session for the first guest", async () => {
+    it("creates a pending access request for the first guest, without a session yet", async () => {
       const result = await runAs(
         world.db,
         "authenticated",
         world.guest1.id,
-        "select * from public.request_table_session($1, 2)",
+        "select * from public.request_table_access($1, 2)",
         [world.qrA1],
       );
-      const session = (result.rows as Array<{ id: string; status: string; table_id: string }>)[0]!;
-      expect(session.status).toBe("pending");
-      sessionId = session.id;
+      const request = (
+        result.rows as Array<{ id: string; status: string; table_session_id: string | null }>
+      )[0]!;
+      expect(request.status).toBe("pending");
+      expect(request.table_session_id).toBeNull();
+      guest1RequestId = request.id;
+
+      // No table session and no membership exists before staff approval.
+      const sessions = await queryRows(
+        world.db,
+        "service_role",
+        null,
+        "select id from public.table_sessions where table_id = $1",
+        [world.tableA1],
+      );
+      expect(sessions).toHaveLength(0);
+      const memberships = await queryRows(
+        world.db,
+        "service_role",
+        null,
+        `select g.id from public.guest_sessions g
+         join public.table_sessions ts on ts.id = g.table_session_id
+         where ts.table_id = $1`,
+        [world.tableA1],
+      );
+      expect(memberships).toHaveLength(0);
+    });
+
+    it("returns the same pending request for a repeated scan (no duplicates)", async () => {
+      const result = await runAs(
+        world.db,
+        "authenticated",
+        world.guest1.id,
+        "select * from public.request_table_access($1, 2)",
+        [world.qrA1],
+      );
+      expect((result.rows as Array<{ id: string }>)[0]?.id).toBe(guest1RequestId);
+      const count = await queryRows<{ n: number }>(
+        world.db,
+        "service_role",
+        null,
+        "select count(*)::int as n from public.table_access_requests where table_id = $1 and user_id = $2 and status = 'pending'",
+        [world.tableA1, world.guest1.id],
+      );
+      expect(count[0]?.n).toBe(1);
+    });
+
+    it("creates a separate pending request for the second guest of the same table", async () => {
+      const result = await runAs(
+        world.db,
+        "authenticated",
+        world.guest2.id,
+        "select * from public.request_table_access($1, 2)",
+        [world.qrA1],
+      );
+      const request = (result.rows as Array<{ id: string; status: string }>)[0]!;
+      expect(request.status).toBe("pending");
+      guest2RequestId = request.id;
+      expect(guest2RequestId).not.toBe(guest1RequestId);
+    });
+
+    it("allows only one open session per table, even at the database level", async () => {
+      // No session exists yet in the approval flow; create one directly and try a second.
+      const pendingSessionId = crypto.randomUUID();
+      await runAs(
+        world.db,
+        "service_role",
+        null,
+        "insert into public.table_sessions (id, restaurant_id, table_id, status) values ($1, $2, $3, 'pending')",
+        [pendingSessionId, world.restaurantA, world.tableA1],
+      );
+      const failure = await expectSqlFailure(
+        world.db,
+        "service_role",
+        null,
+        "insert into public.table_sessions (restaurant_id, table_id, status) values ($1, $2, 'pending')",
+        [world.restaurantA, world.tableA1],
+      );
+      expect(failure.message).toMatch(/unique|table_sessions_one_open_per_table/i);
+      await runAs(
+        world.db,
+        "service_role",
+        null,
+        "delete from public.table_sessions where id = $1",
+        [pendingSessionId],
+      );
+    });
+
+    it("blocks orders while the table has no active session", async () => {
+      // A pending (never activated) occupancy session with the caller enrolled as
+      // a guest still cannot take orders: ts.status must be 'active'.
+      const pendingSessionId = crypto.randomUUID();
+      const pendingGuestId = crypto.randomUUID();
+      await runAs(
+        world.db,
+        "service_role",
+        null,
+        "insert into public.table_sessions (id, restaurant_id, table_id, status) values ($1, $2, $3, 'pending')",
+        [pendingSessionId, world.restaurantA, world.tableA1],
+      );
+      await runAs(
+        world.db,
+        "service_role",
+        null,
+        "insert into public.guest_sessions (id, restaurant_id, table_session_id, user_id) values ($1, $2, $3, $4)",
+        [pendingGuestId, world.restaurantA, pendingSessionId, world.guest1.id],
+      );
+      const failure = await expectSqlFailure(
+        world.db,
+        "authenticated",
+        world.guest1.id,
+        `insert into public.orders (restaurant_id, table_session_id, guest_session_id, notes)
+       values ($1, $2, $3, 'less pedas')`,
+        [world.restaurantA, pendingSessionId, pendingGuestId],
+      );
+      expect(failure.message.toLowerCase()).toMatch(/row-level security|row violates/i);
+      await runAs(
+        world.db,
+        "service_role",
+        null,
+        "delete from public.guest_sessions where id = $1",
+        [pendingGuestId],
+      );
+      await runAs(
+        world.db,
+        "service_role",
+        null,
+        "delete from public.table_sessions where id = $1",
+        [pendingSessionId],
+      );
+    });
+
+    it("rejects approval by non-staff (a guest cannot approve themselves or others)", async () => {
+      const own = await expectSqlFailure(
+        world.db,
+        "authenticated",
+        world.guest1.id,
+        "select public.approve_table_access($1)",
+        [guest1RequestId],
+      );
+      expectPermission(own);
+      const other = await expectSqlFailure(
+        world.db,
+        "authenticated",
+        world.guest2.id,
+        "select public.approve_table_access($1)",
+        [guest1RequestId],
+      );
+      expectPermission(other);
+    });
+
+    it("lets a waiter see and approve the pending request", async () => {
+      const before = await queryRows(
+        world.db,
+        "authenticated",
+        world.waiterA.id,
+        "select status from public.table_access_requests where id = $1",
+        [guest1RequestId],
+      );
+      expect(before[0]).toEqual({ status: "pending" });
+
+      const result = await runAs(
+        world.db,
+        "authenticated",
+        world.waiterA.id,
+        "select * from public.approve_table_access($1)",
+        [guest1RequestId],
+      );
+      expect((result.rows as Array<{ status: string }>)[0]?.status).toBe("approved");
+
+      const sessions = await queryRows<{ id: string; status: string }>(
+        world.db,
+        "service_role",
+        null,
+        "select id, status from public.table_sessions where table_id = $1",
+        [world.tableA1],
+      );
+      expect(sessions).toHaveLength(1);
+      expect(sessions[0]?.status).toBe("active");
+      sessionId = sessions[0]!.id;
 
       const guestSessions = await queryRows<{ id: string }>(
         world.db,
@@ -455,71 +660,36 @@ export function registerDatabaseSecuritySuite(target: "pglite" | "staging") {
       guestSessionId = guestSessions[0]!.id;
     });
 
-    it("joins the same pending session for the second guest", async () => {
+    it("approves the second guest into the same shared table session", async () => {
       const result = await runAs(
         world.db,
         "authenticated",
-        world.guest2.id,
-        "select * from public.request_table_session($1, 2)",
-        [world.qrA1],
+        world.waiterA.id,
+        "select * from public.approve_table_access($1)",
+        [guest2RequestId],
       );
-      const session = (result.rows as Array<{ id: string; status: string }>)[0]!;
-      expect(session.id).toBe(sessionId);
-      expect(session.status).toBe("pending");
-    });
+      expect((result.rows as Array<{ status: string }>)[0]?.status).toBe("approved");
 
-    it("allows only one open session per table, even at the database level", async () => {
-      const failure = await expectSqlFailure(
+      const sessions = await queryRows<{ id: string }>(
         world.db,
         "service_role",
         null,
-        "insert into public.table_sessions (restaurant_id, table_id, status) values ($1, $2, 'pending')",
-        [world.restaurantA, world.tableA1],
+        "select id from public.table_sessions where table_id = $1",
+        [world.tableA1],
       );
-      expect(failure.message).toMatch(/unique|table_sessions_one_open_per_table/i);
-    });
+      expect(sessions).toHaveLength(1);
+      expect(sessions[0]?.id).toBe(sessionId);
 
-    it("blocks orders while the session is pending", async () => {
-      const failure = await expectSqlFailure(
+      const members = await queryRows<{ user_id: string }>(
         world.db,
-        "authenticated",
-        world.guest1.id,
-        `insert into public.orders (restaurant_id, table_session_id, guest_session_id, notes)
-       values ($1, $2, $3, 'less pedas')`,
-        [world.restaurantA, sessionId, guestSessionId],
-      );
-      expect(failure.message.toLowerCase()).toMatch(/row-level security|row violates/i);
-    });
-
-    it("lets a waiter see and approve the session", async () => {
-      const before = await queryRows(
-        world.db,
-        "authenticated",
-        world.waiterA.id,
-        "select status from public.table_sessions where id = $1",
+        "service_role",
+        null,
+        "select user_id from public.guest_sessions where table_session_id = $1 order by created_at",
         [sessionId],
       );
-      expect(before[0]).toEqual({ status: "pending" });
-
-      const result = await runAs(
-        world.db,
-        "authenticated",
-        world.waiterA.id,
-        "select * from public.approve_table_session($1)",
-        [sessionId],
+      expect(members.map((m) => m.user_id).sort()).toEqual(
+        [world.guest1.id, world.guest2.id].sort(),
       );
-      expect((result.rows as Array<{ status: string }>)[0]?.status).toBe("active");
-    });
-
-    it("rejects approval by non-staff (a guest)", async () => {
-      const failure = await expectSqlFailure(
-        world.db,
-        "authenticated",
-        world.guest2.id,
-        "select public.approve_table_session($1)",
-        [sessionId],
-      );
-      expectPermission(failure);
     });
 
     it("lets the guest place an order once the session is active", async () => {
@@ -2598,6 +2768,575 @@ export function registerDatabaseSecuritySuite(target: "pglite" | "staging") {
         [world.categoryA],
       );
       expectPermission(failure2);
+    });
+  });
+
+  describe("phase 7 — QR table access lifecycle", () => {
+    it("anonymous entry projection reveals only safe identity fields", async () => {
+      const rows = await queryRows<Record<string, unknown>>(
+        world.db,
+        "anon",
+        null,
+        "select * from public.get_table_entry($1)",
+        [world.qrA2],
+      );
+      expect(rows).toHaveLength(1);
+      expect(rows[0]).toMatchObject({
+        restaurant_slug: "demo-cafe",
+        restaurant_name: "Demo Cafe Updated",
+        table_name: "Table 2",
+        has_active_session: false,
+        my_status: "none",
+      });
+      expect(rows[0]).not.toHaveProperty("restaurant_id");
+      expect(rows[0]).not.toHaveProperty("table_id");
+      expect(rows[0]).not.toHaveProperty("table_session_id");
+      expect(rows[0]).not.toHaveProperty("qr_token_hash");
+    });
+
+    it("anonymous entry with a garbage token fails safely", async () => {
+      const failure = await expectSqlFailure(
+        world.db,
+        "anon",
+        null,
+        "select * from public.get_table_entry($1)",
+        ["nothexa".repeat(8)],
+      );
+      expect(failure.message).toMatch(/invalid table code/i);
+    });
+
+    it("expired requests cannot be approved and flip to expired", async () => {
+      const guest = makeIdentity("exp-guest");
+      await createUser(world.db, guest, "exp-guest");
+      const requested = await runAs(
+        world.db,
+        "authenticated",
+        guest.id,
+        "select * from public.request_table_access($1)",
+        [world.qrA2],
+      );
+      const requestId = (requested.rows as Array<{ id: string }>)[0]!.id;
+
+      await runAs(
+        world.db,
+        "service_role",
+        null,
+        "update public.table_access_requests set requested_at = pg_catalog.now() - interval '20 minutes', expires_at = pg_catalog.now() - interval '5 minutes' where id = $1",
+        [requestId],
+      );
+
+      // expectSqlFailure rolls back, so use a successful call and inspect the
+      // returned row: the deciding call persists the pending -> expired flip.
+      const expired = await runAs(
+        world.db,
+        "authenticated",
+        world.waiterA.id,
+        "select * from public.approve_table_access($1)",
+        [requestId],
+      );
+      expect((expired.rows as Array<{ status: string }>)[0]?.status).toBe("expired");
+
+      const row = await queryRows<{ status: string; table_session_id: string | null }>(
+        world.db,
+        "service_role",
+        null,
+        "select status, table_session_id from public.table_access_requests where id = $1",
+        [requestId],
+      );
+      expect(row[0]?.status).toBe("expired");
+      expect(row[0]?.table_session_id).toBeNull();
+
+      const again = await expectSqlFailure(
+        world.db,
+        "authenticated",
+        world.waiterA.id,
+        "select public.approve_table_access($1)",
+        [requestId],
+      );
+      expect(again.message).toMatch(/not pending/i);
+    });
+
+    it("rejected requests cannot be approved afterwards", async () => {
+      const guest = makeIdentity("rej-guest");
+      await createUser(world.db, guest, "rej-guest");
+      const requested = await runAs(
+        world.db,
+        "authenticated",
+        guest.id,
+        "select * from public.request_table_access($1)",
+        [world.qrA2],
+      );
+      const requestId = (requested.rows as Array<{ id: string }>)[0]!.id;
+
+      const rejected = await runAs(
+        world.db,
+        "authenticated",
+        world.waiterA.id,
+        "select * from public.reject_table_access($1)",
+        [requestId],
+      );
+      expect((rejected.rows as Array<{ status: string }>)[0]?.status).toBe("rejected");
+
+      const failure = await expectSqlFailure(
+        world.db,
+        "authenticated",
+        world.waiterA.id,
+        "select public.approve_table_access($1)",
+        [requestId],
+      );
+      expect(failure.message).toMatch(/not pending/i);
+    });
+
+    it("the requesting guest can cancel; other guests cannot; cancelled requests cannot be approved", async () => {
+      const guest = makeIdentity("can-guest");
+      await createUser(world.db, guest, "can-guest");
+      const requested = await runAs(
+        world.db,
+        "authenticated",
+        guest.id,
+        "select * from public.request_table_access($1)",
+        [world.qrA2],
+      );
+      const requestId = (requested.rows as Array<{ id: string }>)[0]!.id;
+
+      const notOwner = await expectSqlFailure(
+        world.db,
+        "authenticated",
+        world.guest1.id,
+        "select public.cancel_table_access($1)",
+        [requestId],
+      );
+      expectPermission(notOwner);
+
+      await runAs(world.db, "authenticated", guest.id, "select public.cancel_table_access($1)", [
+        requestId,
+      ]);
+
+      const failure = await expectSqlFailure(
+        world.db,
+        "authenticated",
+        world.waiterA.id,
+        "select public.approve_table_access($1)",
+        [requestId],
+      );
+      expect(failure.message).toMatch(/not pending/i);
+    });
+
+    it("kitchen staff cannot approve or reject table access requests", async () => {
+      const guest = makeIdentity("kit-guest");
+      await createUser(world.db, guest, "kit-guest");
+      const requested = await runAs(
+        world.db,
+        "authenticated",
+        guest.id,
+        "select * from public.request_table_access($1)",
+        [world.qrA2],
+      );
+      const requestId = (requested.rows as Array<{ id: string }>)[0]!.id;
+
+      const approve = await expectSqlFailure(
+        world.db,
+        "authenticated",
+        world.kitchenA.id,
+        "select public.approve_table_access($1)",
+        [requestId],
+      );
+      expectPermission(approve);
+
+      const reject = await expectSqlFailure(
+        world.db,
+        "authenticated",
+        world.kitchenA.id,
+        "select public.reject_table_access($1)",
+        [requestId],
+      );
+      expectPermission(reject);
+
+      await runAs(
+        world.db,
+        "authenticated",
+        world.waiterA.id,
+        "select public.reject_table_access($1)",
+        [requestId],
+      );
+    });
+
+    it("a waiter or admin of another restaurant cannot approve or reject the request", async () => {
+      const guest = makeIdentity("xrest-guest");
+      await createUser(world.db, guest, "xrest-guest");
+      const requested = await runAs(
+        world.db,
+        "authenticated",
+        guest.id,
+        "select * from public.request_table_access($1)",
+        [world.qrA2],
+      );
+      const requestId = (requested.rows as Array<{ id: string }>)[0]!.id;
+
+      const waiterB = await expectSqlFailure(
+        world.db,
+        "authenticated",
+        world.waiterB.id,
+        "select public.approve_table_access($1)",
+        [requestId],
+      );
+      expectPermission(waiterB);
+
+      const adminB = await expectSqlFailure(
+        world.db,
+        "authenticated",
+        world.adminB.id,
+        "select public.reject_table_access($1)",
+        [requestId],
+      );
+      expectPermission(adminB);
+
+      await runAs(
+        world.db,
+        "authenticated",
+        world.waiterA.id,
+        "select public.reject_table_access($1)",
+        [requestId],
+      );
+    });
+
+    it("a restaurant admin can approve access for their own restaurant", async () => {
+      const guest = makeIdentity("adm-guest");
+      await createUser(world.db, guest, "adm-guest");
+      const requested = await runAs(
+        world.db,
+        "authenticated",
+        guest.id,
+        "select * from public.request_table_access($1)",
+        [world.qrA2],
+      );
+      const requestId = (requested.rows as Array<{ id: string }>)[0]!.id;
+
+      const result = await runAs(
+        world.db,
+        "authenticated",
+        world.adminA.id,
+        "select * from public.approve_table_access($1)",
+        [requestId],
+      );
+      expect((result.rows as Array<{ status: string }>)[0]?.status).toBe("approved");
+
+      // Close the session so later tests start with a clean slate.
+      const sessions = await queryRows<{ id: string }>(
+        world.db,
+        "service_role",
+        null,
+        "select id from public.table_sessions where table_id = $1 and status = 'active'",
+        [world.tableA2],
+      );
+      for (const session of sessions) {
+        await runAs(
+          world.db,
+          "authenticated",
+          world.adminA.id,
+          "select public.close_table_session($1)",
+          [session.id],
+        );
+      }
+    });
+
+    it("rate-caps requests to 10 per user per 10-minute window", async () => {
+      const guest = makeIdentity("rate-guest");
+      await createUser(world.db, guest, "rate-guest");
+      for (let index = 0; index < 10; index += 1) {
+        await runAs(
+          world.db,
+          "service_role",
+          null,
+          "insert into public.table_access_requests (restaurant_id, table_id, user_id, status, requested_at) values ($1, $2, $3, 'rejected', pg_catalog.now())",
+          [world.restaurantA, world.tableA2, guest.id],
+        );
+      }
+      const failure = await expectSqlFailure(
+        world.db,
+        "authenticated",
+        guest.id,
+        "select public.request_table_access($1)",
+        [world.qrA2],
+      );
+      expect(failure.message).toMatch(/too many/i);
+    });
+
+    it("regenerating a QR invalidates the old token and activates the new one", async () => {
+      const result = await runAs(
+        world.db,
+        "authenticated",
+        world.adminA.id,
+        "select * from public.regenerate_table_qr_token($1)",
+        [world.tableA2],
+      );
+      const row = (result.rows as Array<{ token: string }>)[0]!;
+      expect(row.token).toMatch(/^[0-9a-f]{64}$/);
+      expect(row.token).not.toBe(world.qrA2);
+
+      const oldToken = await expectSqlFailure(
+        world.db,
+        "anon",
+        null,
+        "select * from public.get_table_entry($1)",
+        [world.qrA2],
+      );
+      expect(oldToken.message).toMatch(/invalid table code/i);
+
+      const oldRequest = await expectSqlFailure(
+        world.db,
+        "authenticated",
+        world.guest1.id,
+        "select public.request_table_access($1)",
+        [world.qrA2],
+      );
+      expect(oldRequest.message).toMatch(/invalid table code/i);
+
+      const fresh = await queryRows<{ table_name: string }>(
+        world.db,
+        "anon",
+        null,
+        "select table_name from public.get_table_entry($1)",
+        [row.token],
+      );
+      expect(fresh[0]?.table_name).toBe("Table 2");
+
+      // Restore the fixture token hash so later suites and reruns stay consistent.
+      await runAs(
+        world.db,
+        "service_role",
+        null,
+        "update public.restaurant_tables set qr_token_hash = md5($2) where id = $1",
+        [world.tableA2, world.qrA2],
+      );
+    });
+
+    it("waiters and kitchen cannot regenerate QR codes; only the restaurant admin can", async () => {
+      const waiter = await expectSqlFailure(
+        world.db,
+        "authenticated",
+        world.waiterA.id,
+        "select public.regenerate_table_qr_token($1)",
+        [world.tableA2],
+      );
+      expectPermission(waiter);
+
+      const kitchen = await expectSqlFailure(
+        world.db,
+        "authenticated",
+        world.kitchenA.id,
+        "select public.regenerate_table_qr_token($1)",
+        [world.tableA2],
+      );
+      expectPermission(kitchen);
+
+      const crossTenant = await expectSqlFailure(
+        world.db,
+        "authenticated",
+        world.adminB.id,
+        "select public.regenerate_table_qr_token($1)",
+        [world.tableA2],
+      );
+      expectPermission(crossTenant);
+    });
+
+    it("a table QR token resolves only to its own restaurant", async () => {
+      const rows = await queryRows<{ restaurant_slug: string }>(
+        world.db,
+        "anon",
+        null,
+        "select restaurant_slug from public.get_table_entry($1)",
+        [world.qrB1],
+      );
+      expect(rows[0]?.restaurant_slug).toBe("other-bistro");
+
+      const cross = await queryRows<{ n: number }>(
+        world.db,
+        "service_role",
+        null,
+        "select count(*)::int as n from public.restaurant_tables where qr_token_hash = md5($1) and restaurant_id = $2",
+        [world.qrB1, world.restaurantA],
+      );
+      expect(cross[0]?.n).toBe(0);
+    });
+
+    it("closing a session cancels its pending join requests; the cancelled request cannot be approved", async () => {
+      const closer = makeIdentity("close1-guest");
+      const joiner = makeIdentity("close2-guest");
+      await createUser(world.db, closer, "close1-guest");
+      await createUser(world.db, joiner, "close2-guest");
+
+      const openRequest = await runAs(
+        world.db,
+        "authenticated",
+        closer.id,
+        "select * from public.request_table_access($1)",
+        [world.qrA2],
+      );
+      const openId = (openRequest.rows as Array<{ id: string }>)[0]!.id;
+      await runAs(
+        world.db,
+        "authenticated",
+        world.waiterA.id,
+        "select public.approve_table_access($1)",
+        [openId],
+      );
+
+      // Second guest asks to join while the session is active; the request attaches to it.
+      const joinRequest = await runAs(
+        world.db,
+        "authenticated",
+        joiner.id,
+        "select * from public.request_table_access($1)",
+        [world.qrA2],
+      );
+      const joinId = (joinRequest.rows as Array<{ id: string }>)[0]!.id;
+      const linked = await queryRows<{ table_session_id: string | null }>(
+        world.db,
+        "service_role",
+        null,
+        "select table_session_id from public.table_access_requests where id = $1",
+        [joinId],
+      );
+      expect(linked[0]?.table_session_id).not.toBeNull();
+
+      const sessions = await queryRows<{ id: string }>(
+        world.db,
+        "service_role",
+        null,
+        "select id from public.table_sessions where table_id = $1 and status = 'active'",
+        [world.tableA2],
+      );
+      expect(sessions).toHaveLength(1);
+      await runAs(
+        world.db,
+        "authenticated",
+        world.waiterA.id,
+        "select public.close_table_session($1)",
+        [sessions[0]!.id],
+      );
+
+      const after = await queryRows<{ status: string }>(
+        world.db,
+        "service_role",
+        null,
+        "select status from public.table_access_requests where id = $1",
+        [joinId],
+      );
+      expect(after[0]?.status).toBe("cancelled");
+
+      const failure = await expectSqlFailure(
+        world.db,
+        "authenticated",
+        world.waiterA.id,
+        "select public.approve_table_access($1)",
+        [joinId],
+      );
+      expect(failure.message).toMatch(/not pending/i);
+    });
+
+    it("a guest whose session closed must request and be approved again", async () => {
+      const guest = makeIdentity("again-guest");
+      await createUser(world.db, guest, "again-guest");
+
+      const firstRequest = await runAs(
+        world.db,
+        "authenticated",
+        guest.id,
+        "select * from public.request_table_access($1)",
+        [world.qrA2],
+      );
+      const firstId = (firstRequest.rows as Array<{ id: string }>)[0]!.id;
+      await runAs(
+        world.db,
+        "authenticated",
+        world.waiterA.id,
+        "select public.approve_table_access($1)",
+        [firstId],
+      );
+
+      const sessions = await queryRows<{ id: string }>(
+        world.db,
+        "service_role",
+        null,
+        "select id from public.table_sessions where table_id = $1 and status = 'active'",
+        [world.tableA2],
+      );
+      for (const session of sessions) {
+        await runAs(
+          world.db,
+          "authenticated",
+          world.waiterA.id,
+          "select public.close_table_session($1)",
+          [session.id],
+        );
+      }
+
+      const again = await runAs(
+        world.db,
+        "authenticated",
+        guest.id,
+        "select * from public.request_table_access($1)",
+        [world.qrA2],
+      );
+      expect((again.rows as Array<{ status: string }>)[0]?.status).toBe("pending");
+    });
+
+    it("get_table_entry reports the caller's own access state (pending then approved)", async () => {
+      const guest = makeIdentity("state-guest");
+      await createUser(world.db, guest, "state-guest");
+
+      const requested = await runAs(
+        world.db,
+        "authenticated",
+        guest.id,
+        "select * from public.request_table_access($1)",
+        [world.qrA2],
+      );
+      const requestId = (requested.rows as Array<{ id: string }>)[0]!.id;
+
+      const pending = await runAs(
+        world.db,
+        "authenticated",
+        guest.id,
+        "select my_status from public.get_table_entry($1)",
+        [world.qrA2],
+      );
+      expect(pending.rows[0]?.my_status).toBe("pending");
+
+      await runAs(
+        world.db,
+        "authenticated",
+        world.waiterA.id,
+        "select public.approve_table_access($1)",
+        [requestId],
+      );
+
+      const approved = await runAs(
+        world.db,
+        "authenticated",
+        guest.id,
+        "select my_status from public.get_table_entry($1)",
+        [world.qrA2],
+      );
+      expect(approved.rows[0]?.my_status).toBe("approved");
+
+      const sessions = await queryRows<{ id: string }>(
+        world.db,
+        "service_role",
+        null,
+        "select id from public.table_sessions where table_id = $1 and status = 'active'",
+        [world.tableA2],
+      );
+      for (const session of sessions) {
+        await runAs(
+          world.db,
+          "authenticated",
+          world.waiterA.id,
+          "select public.close_table_session($1)",
+          [session.id],
+        );
+      }
     });
   });
 }

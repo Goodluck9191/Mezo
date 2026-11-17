@@ -35,8 +35,15 @@ export default async function WaiterPage() {
 
       <h1 className="mt-4 text-2xl font-semibold tracking-tight sm:text-3xl">Tables and guests</h1>
       <p className="mt-2 text-sm leading-6 text-muted">
-        You see the tables where you work. Live ordering and approvals arrive in Phase 7.
+        You see the tables where you work. Open the floor console to approve seating requests and
+        close tables — or head to the kitchen board when your restaurant calls.
       </p>
+
+      <div className="mt-6">
+        <Link href="/waiter/tables" className={buttonVariants({ variant: "primary" })}>
+          Open table console
+        </Link>
+      </div>
 
       <ul className="mt-6 grid gap-4">
         {memberships.map((membership) => (

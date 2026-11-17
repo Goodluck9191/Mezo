@@ -1007,7 +1007,7 @@ export type Database = {
           id: string;
           is_active: boolean;
           name: string;
-          qr_token: string;
+          qr_token_hash: string;
           restaurant_id: string;
           updated_at: string;
         };
@@ -1017,7 +1017,7 @@ export type Database = {
           id?: string;
           is_active?: boolean;
           name: string;
-          qr_token?: string;
+          qr_token_hash?: string;
           restaurant_id: string;
           updated_at?: string;
         };
@@ -1026,7 +1026,7 @@ export type Database = {
           id?: string;
           is_active?: boolean;
           name?: string;
-          qr_token?: string;
+          qr_token_hash?: string;
           restaurant_id?: string;
           updated_at?: string;
         };
@@ -1248,6 +1248,88 @@ export type Database = {
           updated_at?: string;
         };
         Relationships: [];
+      };
+      table_access_requests: {
+        Row: {
+          decided_at: string | null;
+          decided_by: string | null;
+          expires_at: string;
+          guest_session_id: string | null;
+          id: string;
+          party_size: number | null;
+          requested_at: string;
+          restaurant_id: string;
+          status: Database["public"]["Enums"]["table_access_request_status"];
+          table_id: string;
+          table_session_id: string | null;
+          user_id: string;
+        };
+        ComputedFields: never;
+        Insert: {
+          decided_at?: string | null;
+          decided_by?: string | null;
+          expires_at?: string;
+          guest_session_id?: string | null;
+          id?: string;
+          party_size?: number | null;
+          requested_at?: string;
+          restaurant_id: string;
+          status?: Database["public"]["Enums"]["table_access_request_status"];
+          table_id: string;
+          table_session_id?: string | null;
+          user_id: string;
+        };
+        Update: {
+          decided_at?: string | null;
+          decided_by?: string | null;
+          expires_at?: string;
+          guest_session_id?: string | null;
+          id?: string;
+          party_size?: number | null;
+          requested_at?: string;
+          restaurant_id?: string;
+          status?: Database["public"]["Enums"]["table_access_request_status"];
+          table_id?: string;
+          table_session_id?: string | null;
+          user_id?: string;
+        };
+        Relationships: [
+          {
+            foreignKeyName: "table_access_requests_guest_session_id_fkey";
+            columns: ["guest_session_id"];
+            isOneToOne: false;
+            referencedRelation: "guest_sessions";
+            referencedColumns: ["id"];
+          },
+          {
+            foreignKeyName: "table_access_requests_restaurant_id_fkey";
+            columns: ["restaurant_id"];
+            isOneToOne: false;
+            referencedRelation: "restaurants";
+            referencedColumns: ["id"];
+          },
+          {
+            foreignKeyName: "table_access_requests_table_id_restaurant_id_fkey";
+            columns: ["table_id", "restaurant_id"];
+            isOneToOne: false;
+            referencedRelation: "restaurant_tables";
+            referencedColumns: ["id", "restaurant_id"];
+          },
+          {
+            foreignKeyName: "table_access_requests_session_fk";
+            columns: ["table_session_id", "restaurant_id"];
+            isOneToOne: false;
+            referencedRelation: "table_sessions";
+            referencedColumns: ["id", "restaurant_id"];
+          },
+          {
+            foreignKeyName: "table_access_requests_user_id_fkey";
+            columns: ["user_id"];
+            isOneToOne: false;
+            referencedRelation: "profiles";
+            referencedColumns: ["id"];
+          },
+        ];
       };
       table_sessions: {
         Row: {
@@ -1499,6 +1581,29 @@ export type Database = {
           isSetofReturn: false;
         };
       };
+      approve_table_access: {
+        Args: { p_request_id: string };
+        Returns: {
+          decided_at: string | null;
+          decided_by: string | null;
+          expires_at: string;
+          guest_session_id: string | null;
+          id: string;
+          party_size: number | null;
+          requested_at: string;
+          restaurant_id: string;
+          status: Database["public"]["Enums"]["table_access_request_status"];
+          table_id: string;
+          table_session_id: string | null;
+          user_id: string;
+        };
+        SetofOptions: {
+          from: "*";
+          to: "table_access_requests";
+          isOneToOne: true;
+          isSetofReturn: false;
+        };
+      };
       approve_table_session: {
         Args: { p_session_id: string };
         Returns: {
@@ -1551,6 +1656,29 @@ export type Database = {
       };
       can_read_order: { Args: { p_order_id: string; p_restaurant_id: string }; Returns: boolean };
       can_write_order: { Args: { p_order_id: string; p_restaurant_id: string }; Returns: boolean };
+      cancel_table_access: {
+        Args: { p_request_id: string };
+        Returns: {
+          decided_at: string | null;
+          decided_by: string | null;
+          expires_at: string;
+          guest_session_id: string | null;
+          id: string;
+          party_size: number | null;
+          requested_at: string;
+          restaurant_id: string;
+          status: Database["public"]["Enums"]["table_access_request_status"];
+          table_id: string;
+          table_session_id: string | null;
+          user_id: string;
+        };
+        SetofOptions: {
+          from: "*";
+          to: "table_access_requests";
+          isOneToOne: true;
+          isSetofReturn: false;
+        };
+      };
       close_table_session: {
         Args: { p_session_id: string };
         Returns: {
@@ -1603,6 +1731,15 @@ export type Database = {
           isSetofReturn: false;
         };
       };
+      create_table_with_qr: {
+        Args: { p_restaurant_id: string; p_name: string };
+        Returns: {
+          id: string;
+          is_active: boolean;
+          name: string;
+          token: string;
+        }[];
+      };
       current_user_email: { Args: Record<PropertyKey, never>; Returns: string };
       deactivate_restaurant_member: {
         Args: { p_member_id: string };
@@ -1649,6 +1786,18 @@ export type Database = {
           restaurant_name: string;
           restaurant_region: string;
           restaurant_slug: string;
+        }[];
+      };
+      get_table_entry: {
+        Args: { p_qr_token: string };
+        Returns: {
+          has_active_session: boolean;
+          my_status: string;
+          restaurant_description: string | null;
+          restaurant_logo_url: string | null;
+          restaurant_name: string;
+          restaurant_slug: string;
+          table_name: string;
         }[];
       };
       guest_can_order: {
@@ -1711,25 +1860,56 @@ export type Database = {
           status: Database["public"]["Enums"]["payment_status"];
         }[];
       };
-      request_table_session: {
-        Args: { p_party_size?: number; p_qr_token: string };
+      regenerate_table_qr_token: {
+        Args: { p_table_id: string };
         Returns: {
-          approved_at: string | null;
-          approved_by: string | null;
-          closed_at: string | null;
-          closed_by: string | null;
-          created_at: string;
+          id: string;
+          name: string;
+          token: string;
+        }[];
+      };
+      reject_table_access: {
+        Args: { p_request_id: string };
+        Returns: {
+          decided_at: string | null;
+          decided_by: string | null;
+          expires_at: string;
+          guest_session_id: string | null;
           id: string;
           party_size: number | null;
           requested_at: string;
           restaurant_id: string;
-          status: Database["public"]["Enums"]["table_session_status"];
+          status: Database["public"]["Enums"]["table_access_request_status"];
           table_id: string;
-          updated_at: string;
+          table_session_id: string | null;
+          user_id: string;
         };
         SetofOptions: {
           from: "*";
-          to: "table_sessions";
+          to: "table_access_requests";
+          isOneToOne: true;
+          isSetofReturn: false;
+        };
+      };
+      request_table_access: {
+        Args: { p_party_size?: number; p_qr_token: string };
+        Returns: {
+          decided_at: string | null;
+          decided_by: string | null;
+          expires_at: string;
+          guest_session_id: string | null;
+          id: string;
+          party_size: number | null;
+          requested_at: string;
+          restaurant_id: string;
+          status: Database["public"]["Enums"]["table_access_request_status"];
+          table_id: string;
+          table_session_id: string | null;
+          user_id: string;
+        };
+        SetofOptions: {
+          from: "*";
+          to: "table_access_requests";
           isOneToOne: true;
           isSetofReturn: false;
         };
@@ -1874,6 +2054,7 @@ export type Database = {
       restaurant_role: "restaurant_admin" | "waiter" | "kitchen";
       staff_invitation_status: "pending" | "accepted" | "revoked" | "expired";
       subscription_status: "pending" | "active" | "past_due" | "cancelled" | "expired";
+      table_access_request_status: "pending" | "approved" | "rejected" | "expired" | "cancelled";
       table_session_status: "pending" | "active" | "closed";
       waiter_request_status: "open" | "acknowledged" | "resolved" | "cancelled";
       waiter_request_type: "assistance" | "bill" | "other";
@@ -2003,6 +2184,7 @@ export const Constants = {
       restaurant_role: ["restaurant_admin", "waiter", "kitchen"],
       staff_invitation_status: ["pending", "accepted", "revoked", "expired"],
       subscription_status: ["pending", "active", "past_due", "cancelled", "expired"],
+      table_access_request_status: ["pending", "approved", "rejected", "expired", "cancelled"],
       table_session_status: ["pending", "active", "closed"],
       waiter_request_status: ["open", "acknowledged", "resolved", "cancelled"],
       waiter_request_type: ["assistance", "bill", "other"],
