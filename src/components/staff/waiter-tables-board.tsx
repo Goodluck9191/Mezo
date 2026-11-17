@@ -49,7 +49,10 @@ export function WaiterTablesBoard({
 
     const channels = restaurants.map((restaurant) =>
       supabase
-        .channel(`staff-table-access-${restaurant.restaurantId}`)
+        // Unique topic per effect run: singleton client + same topic would
+        // return the already-subscribed channel and re-adding callbacks
+        // after subscribe() throws (StrictMode remounts in dev).
+        .channel(`staff-table-access-${restaurant.restaurantId}-${crypto.randomUUID()}`)
         .on(
           "postgres_changes",
           {

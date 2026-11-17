@@ -89,8 +89,14 @@ export function TableAccessPanel({
       } = await supabase.auth.getUser();
       if (!user) return;
 
+      // StrictMode remounts: the browser supabase client is a singleton and
+      // client.channel() returns the SAME channel object for the same topic
+      // (removeChannel only unsubscribes, never evicts from the registry).
+      // A re-subscribed channel would throw "cannot add postgres_changes
+      // callbacks after subscribe()". A unique topic per effect run avoids
+      // reusing an already-subscribed channel object; cleanup unsubscribes.
       const channel = supabase
-        .channel(`table-access-${user.id}`)
+        .channel(`table-access-${user.id}-${crypto.randomUUID()}`)
         .on(
           "postgres_changes",
           {
