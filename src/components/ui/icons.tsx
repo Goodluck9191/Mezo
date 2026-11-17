@@ -30,6 +30,15 @@ export function ArrowRightIcon(props: IconProps) {
   );
 }
 
+export function BellIcon(props: IconProps) {
+  return (
+    <svg {...baseProps(props)}>
+      <path d="M6 9.5a6 6 0 0 1 12 0c0 3 .8 4.6 1.7 5.7H4.3C5.2 14.1 6 12.5 6 9.5Z" />
+      <path d="M10 19a2.2 2.2 0 0 0 4 0" />
+    </svg>
+  );
+}
+
 export function CheckIcon(props: IconProps) {
   return (
     <svg {...baseProps(props)}>

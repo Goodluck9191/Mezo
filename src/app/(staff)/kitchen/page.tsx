@@ -35,7 +35,8 @@ export default async function KitchenPage() {
 
       <h1 className="mt-4 text-2xl font-semibold tracking-tight sm:text-3xl">Incoming orders</h1>
       <p className="mt-2 text-sm leading-6 text-muted">
-        You see the restaurants whose orders you prepare. The live order board arrives in Phase 7.
+        You see the restaurants whose orders you prepare. The live order board arrives with the
+        ordering phase.
       </p>
 
       <ul className="mt-6 grid gap-4">

@@ -28,6 +28,7 @@ const NAV_SECTIONS: ReadonlyArray<{
       { key: "dashboard", label: "Dashboard", href: "/restaurant/dashboard" },
       { key: "onboarding", label: "Onboarding", href: "/restaurant/onboarding" },
       { key: "menu", label: "Menu", href: "/restaurant/menu" },
+      { key: "tables", label: "Tables", href: "/restaurant/tables" },
     ],
   },
   {
@@ -42,7 +43,7 @@ const NAV_SECTIONS: ReadonlyArray<{
 ];
 
 export type WorkspaceActive =
-  "dashboard" | "onboarding" | "menu" | "settings" | "profile" | "staff" | "billing";
+  "dashboard" | "onboarding" | "menu" | "tables" | "settings" | "profile" | "staff" | "billing";
 
 export function WorkspaceShell({
   userEmail,

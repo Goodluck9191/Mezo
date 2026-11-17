@@ -9,8 +9,11 @@
  *     table B1, item.
  *   Restaurant C (approved, active): Growth subscription replaced by Starter
  *     (5 tables) for the table-limit test.
- *   Guests guest1 and guest2 for the QR scan flow.
+ *   Guests guest1 and guest2 for the QR access flow.
  *
+ * The tables are created with deterministic cleartext QR tokens
+ * ("aa…/bb…/cc…/dd…" repeated — 64 hex chars, 244 bits of pretending) stored
+ * as md5 hashes, so the suite can call the QR RPCs with known tokens.
  * Everything is created as the database superuser (PGlite `postgres`), never
  * through a client role, so fixture setup is unconstrained.
  */
@@ -49,6 +52,7 @@ export interface World {
   itemB: string;
   qrA1: string;
   qrA2: string;
+  qrB1: string;
   growthPlanId: string;
   starterPlanId: string;
 }
@@ -176,10 +180,29 @@ export async function buildWorld(target: DbTarget = "pglite"): Promise<World> {
   const tableB1 = crypto.randomUUID();
   const tableC1 = crypto.randomUUID();
 
+  const qrA1 = "aa".repeat(32);
+  const qrA2 = "bb".repeat(32);
+  const qrB1 = "cc".repeat(32);
+  const qrC1 = "dd".repeat(32);
+
   await db.query(
-    `insert into public.restaurant_tables (id, restaurant_id, name)
-     values ($1, $2, 'Table 1'), ($3, $4, 'Table 2'), ($5, $6, 'Table 1'), ($7, $8, 'T1')`,
-    [tableA1, restaurantA, tableA2, restaurantA, tableB1, restaurantB, tableC1, restaurantC],
+    `insert into public.restaurant_tables (id, restaurant_id, name, qr_token_hash)
+     values ($1, $2, 'Table 1', md5($5)), ($3, $4, 'Table 2', md5($6)),
+            ($7, $8, 'Table 1', md5($9)), ($10, $11, 'T1', md5($12))`,
+    [
+      tableA1,
+      restaurantA,
+      tableA2,
+      restaurantA,
+      qrA1,
+      qrA2,
+      tableB1,
+      restaurantB,
+      qrB1,
+      tableC1,
+      restaurantC,
+      qrC1,
+    ],
   );
 
   const categoryA = crypto.randomUUID();
@@ -208,13 +231,6 @@ export async function buildWorld(target: DbTarget = "pglite"): Promise<World> {
     [itemA, restaurantA, categoryA, itemA2, restaurantB, itemB, categoryB],
   );
 
-  const tokens = await db.query<{ id: string; qr_token: string }>(
-    "select id, qr_token from public.restaurant_tables where id in ($1, $2)",
-    [tableA1, tableA2],
-  );
-  const qrA1 = tokens.rows.find((r) => r.id === tableA1)!.qr_token;
-  const qrA2 = tokens.rows.find((r) => r.id === tableA2)!.qr_token;
-
   return {
     db,
     platformAdmin,
@@ -241,6 +257,7 @@ export async function buildWorld(target: DbTarget = "pglite"): Promise<World> {
     itemB,
     qrA1,
     qrA2,
+    qrB1,
     growthPlanId,
     starterPlanId,
   };

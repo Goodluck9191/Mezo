@@ -153,6 +153,12 @@ export default async function RestaurantSettingsPage({
             description="Create categories and items, upload images, control availability."
           />
           <SettingCard
+            href={`/restaurant/tables${suffix}`}
+            icon={<QrCodeIcon className="size-5" />}
+            title="Tables & QR codes"
+            description="Add tables, download and print table QR codes, see which seats are open."
+          />
+          <SettingCard
             href={`/restaurant/billing${suffix}`}
             icon={<WalletIcon className="size-5" />}
             title="Subscription & billing"
